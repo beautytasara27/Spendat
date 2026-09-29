@@ -1,0 +1,194 @@
+# Spenddat — Autonomous Purchasing Agent
+
+Turns a plain-English request ("buy a phone case from acp merchant, under $25") into a real
+purchase, governed by a deterministic, auditable policy engine. In-policy purchases execute
+**autonomously**; only risky, ambiguous or out-of-policy ones are **escalated** to a human;
+forbidden ones are **denied** outright. Every step lands in a tamper-evident audit log.
+
+```
+request ──► Intent parser (LLM, schema-validated) ──► Vendor adapter: search + resolve price
+                                                          │
+                              ┌── DENY ──► reject + notify user (no human, no purchase)
+Policy engine (pure, no LLM) ─┼── ESCALATE ──► approval (human) ──► approve / deny / timeout
+                              └── ALLOW ────────────┐                    │
+                                                    ▼                    ▼
+                               Execution gate ─► hard circuit breakers ─► scoped payment token
+                                                 ─► vendor checkout ─► revoke token ─► audit
+```
+
+* **Vendor A:** any merchant implementing the **Agentic Commerce Protocol (ACP)** — an open
+  REST checkout standard merchants publish *for* AI agents (official API, no scraping).
+* **Payments:** **Stripe Shared Payment Tokens** — per-transaction, amount-capped,
+  seller-scoped, time-limited, revoked after use. No card number ever touches this system.
+* **Intent parsing:** Anthropic Messages API with a forced tool call, then deterministic
+  validation.
+* **Storage:** SQLite, hash-chained append-only audit log.
+
+See [`docs/architecture.md`](docs/architecture.md) and the ADRs in [`docs/adr/`](docs/adr/).
+
+---
+
+## Quick start (sandbox, no credentials)
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"
+
+make test          # full suite, sandbox only, no credentials, no network
+make lint          # ruff lint + format check
+make demo          # both PRD flows end-to-end over HTTP against a local ACP merchant
+```
+
+`make demo` starts the bundled reference ACP merchant, runs an in-policy request (ALLOW →
+autonomous purchase) and an over-cap request (ESCALATE → approval → purchase), and prints
+both audit trails.
+
+## Configuration
+
+| What | Where | Notes |
+|---|---|---|
+| Runtime mode | `SPENDDAT_MODE=sandbox\|live` | default `sandbox` |
+| Live-mode safety latch | `SPENDDAT_LIVE_CONFIRM=I_ACCEPT_REAL_PURCHASES` | required for live |
+| Policy | `policies/default.yaml` (`SPENDDAT_POLICY_FILE`) | versioned YAML, see below |
+| Vendors | `config/vendors.yaml` (`SPENDDAT_VENDORS_FILE`) | per-mode endpoints; no secrets |
+| Buyer profile | `config/profile.yaml` (`SPENDDAT_PROFILE_FILE`) | git-ignored; copy the example |
+| Hard ceilings | `SPENDDAT_HARD_MAX_{TRANSACTION,DAILY,WEEKLY}_MINOR` | circuit breakers, cents |
+| Secrets backend | `SPENDDAT_SECRETS_BACKEND=env\|command` | see *Secrets* |
+| Payment backend | `SPENDDAT_PAYMENT_BACKEND=stripe\|fake` | `fake` refused in live |
+| LLM model | `SPENDDAT_LLM_MODEL` | default `claude-sonnet-5-5` |
+
+All variables are listed in [`.env.example`](.env.example).
+
+### Sandbox vs live
+
+One codebase, one code path. Mode selects **only** which credentials and endpoints are
+loaded; the policy engine takes no mode input (a test asserts this) and decisions are
+identical in both modes (a parametrised test asserts this too).
+
+| | sandbox | live |
+|---|---|---|
+| Stripe key | `sk_test_…` / `rk_test_…` required | `sk_live_…` / `rk_live_…` required |
+| Stripe `livemode` on each token | must be `false` | must be `true` |
+| Vendor endpoints | `vendors.yaml → sandbox:` | `vendors.yaml → live:` (https only, no placeholders) |
+| Secrets | `SPENDDAT_SANDBOX_*` | `SPENDDAT_LIVE_*` (never falls back to sandbox) |
+| Fake payment/stub vendor | allowed | refused at construction |
+| Startup | checks | strict checks + `SPENDDAT_LIVE_CONFIRM` latch; exits 78 on any problem |
+
+The mode is written on every audit event and log line, and `history`/`approvals`/`spend`
+accept `--mode sandbox|live|all`.
+
+Validate a configuration without doing anything: `SPENDDAT_MODE=live spenddat check`.
+
+### Secrets
+
+Secrets are never in files. Names are namespaced by mode:
+
+* **env backend** (CI/dev): `SPENDDAT_<MODE>_<NAME>`, e.g. `SPENDDAT_LIVE_STRIPE_SECRET_KEY`.
+* **command backend** (production): any secrets-manager CLI, e.g.
+  `SPENDDAT_SECRETS_COMMAND='op read op://spenddat/{mode}_{name}/credential'` or
+  `aws secretsmanager get-secret-value --secret-id spenddat/{mode}/{name} --query SecretString --output text`.
+
+| Secret name | Purpose |
+|---|---|
+| `stripe_secret_key` | Stripe key; a **restricted** key with Shared Payment Tokens write is recommended |
+| `stripe_payment_method_id` | the buyer's saved PaymentMethod (`pm_…`) — a reference, not card data |
+| `anthropic_api_key` | intent parsing |
+| `acp_merchant_api_key` | bearer key issued by the merchant (name set in `vendors.yaml`) |
+| `approval_webhook_url` | optional Slack/Teams-style webhook for approval notifications |
+
+Logs pass through a redaction filter (keys, bearer tokens, SPT ids, PAN-like numbers) as a
+second line of defence.
+
+## Policy schema reference
+
+```yaml
+version: "2026-09-29.1"      # bump on every change; SHA-256 of the file is appended
+currency: usd
+vendors:
+  allow: [acp_merchant]      # may be bought from autonomously
+  deny:  [sketchy_mart]      # DENY outright
+categories:
+  allow: [electronics_accessories, office_supplies, household, books, personal_care]
+  deny:  [subscriptions, gift_cards, alcohol, tobacco, weapons, prescription_drugs, ...]
+caps:                        # integer cents
+  per_transaction_minor: 5000
+  per_category_minor: {electronics_accessories: 3000, office_supplies: 7500, books: 4000}
+  daily_minor: 15000         # rolling 24h, committed + in-flight spend
+  weekly_minor: 40000        # rolling 7d
+anomaly:
+  price_deviation_pct: 40    # unit price vs rolling avg of past purchases (same SKU, else category)
+  min_history: 3             # purchases needed before the price rule applies
+  history_days: 30
+  velocity: {max_purchases: 5, window_minutes: 60}
+approval:
+  timeout_minutes: 60        # unanswered escalations are auto-denied
+```
+
+Decision rules (all in `src/spenddat/policy/engine.py`, each a separate function):
+
+| Outcome | Reason codes |
+|---|---|
+| **DENY** | `vendor_blocklisted`, `category_denied`, `currency_unsupported`, `malformed_quantity`, `malformed_price`, `inconsistent_total` |
+| **ESCALATE** | `vendor_not_preapproved`, `category_not_preapproved`, `no_product_match`, `ambiguous_product_match`, `missing_shipping_address`, `missing_price`, `user_max_price_exceeded`, `price_cap_exceeded`, `category_cap_exceeded`, `daily_cap_exceeded`, `weekly_cap_exceeded`, `price_anomaly`, `velocity_exceeded` |
+| **ALLOW** | none of the above fired |
+
+DENY beats ESCALATE; all firing reasons are reported, e.g.
+`category_cap_exceeded: $34.99 > $30.00 limit for category electronics_accessories`.
+
+A user-stated limit ("under $25") applies to item price × quantity; the policy caps apply
+to the full total including shipping and tax.
+
+**Hard ceilings** (`SPENDDAT_HARD_MAX_*`) are separate from policy: checked after policy and
+after approval, atomically with the spend reservation. Nobody can approve past them.
+
+## Using it
+
+```bash
+spenddat buy "buy a clear phone case for my iPhone 15 from acp merchant, under \$25"
+spenddat approvals --mode live                # pending escalations
+spenddat review                               # interactive approve / lower ceiling / deny
+spenddat approve apr_123 [--max-total 60] [--quantity 1] [--as alice]
+spenddat deny apr_123
+spenddat history --mode live
+spenddat show txn_...                         # full audit trail of one transaction
+spenddat spend --mode live                    # cumulative spend vs policy and hard caps
+spenddat verify-audit                         # recompute the hash chain
+spenddat sweep                                # expire timed-out approvals (cron this)
+spenddat reconcile                            # resolve purchases with unknown outcome
+spenddat sandbox-merchant --port 8787         # local ACP merchant for sandbox runs
+```
+
+`buy --request-id <id>` makes a submission idempotent: retrying with the same id returns the
+existing transaction and never buys twice.
+
+## Live-mode demonstration
+
+The runbook for the two required live purchases (autonomous ALLOW and human-approved
+ESCALATE) is in [`docs/live-demo-runbook.md`](docs/live-demo-runbook.md).
+
+## Adding a vendor
+
+See [`docs/adding-a-vendor.md`](docs/adding-a-vendor.md). In short: implement
+`VendorAdapter` (4 methods), add a builder to `ADAPTER_BUILDERS`, add a `vendors.yaml` entry,
+add your factory to the contract test. Policy, approval and orchestration code stay untouched.
+
+## Layout
+
+```
+src/spenddat/
+  models.py            typed domain objects (money in integer cents)
+  policy/              config loader + pure deterministic engine
+  guards.py            hard circuit breakers
+  intent/              LLM extraction + deterministic validation
+  approval/            escalation lifecycle, notifiers, timeouts
+  orchestrator.py      pipeline, single execution gate, reconciliation
+  payments/            Stripe Shared Payment Tokens (+ sandbox-only fake)
+  vendors/             adapter interface, ACP adapter, stub adapter, factory
+  audit.py             hash-chained append-only log + projections
+  secrets.py           mode-namespaced secrets (env / secrets-manager CLI)
+  observability.py     JSON logs, correlation ids, redaction
+  sandbox/             reference ACP merchant (sandbox only)
+  cli.py
+tests/                 153 tests (+1 opt-in Stripe test-mode test); tests/contract = adapter contract suite
+docs/                  architecture, ADRs, runbooks
+```
