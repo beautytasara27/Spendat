@@ -1,0 +1,19 @@
+# Vendor integrations. No secrets here: `api_key_secret` names a secret that is read from
+# the secrets backend as SPENDDAT_<MODE>_<NAME> (env backend) or via SPENDDAT_SECRETS_COMMAND.
+vendors:
+  - id: acp_merchant
+    type: acp                      # Agentic Commerce Protocol merchant (official API)
+    sandbox:
+      # Reference merchant: `spenddat sandbox-merchant`, or a merchant's ACP staging URL.
+      base_url: http://127.0.0.1:8787
+      feed_url: http://127.0.0.1:8787/feed.json
+      seller_profile: profile_test_REPLACE_WITH_SELLER_TEST_PROFILE
+      api_key_secret: acp_merchant_api_key
+      api_version: "2025-09-29"
+    live:
+      # Fill in from the merchant's ACP onboarding (endpoint, product feed, Stripe profile).
+      base_url: https://REPLACE-merchant.example.com/acp
+      feed_url: https://REPLACE-merchant.example.com/acp/feed.json
+      seller_profile: profile_REPLACE_WITH_SELLER_LIVE_PROFILE
+      api_key_secret: acp_merchant_api_key
+      api_version: "2025-09-29"

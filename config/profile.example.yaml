@@ -1,0 +1,14 @@
+# Copy to config/profile.yaml (git-ignored) and fill in. Personal data, not secrets:
+# it is sent to the merchant at checkout, never to the LLM.
+ship_to:
+  name: Jane Buyer
+  line_one: 123 Example St
+  line_two: Apt 4
+  city: New York
+  state: NY
+  postal_code: "10001"
+  country: US
+buyer:
+  first_name: Jane
+  last_name: Buyer
+  email: jane@example.com
