@@ -1,0 +1,32 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      SPENDDAT_MODE: sandbox          # CI never has live credentials
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests tools && ruff format --check src tests tools
+      - run: pytest --cov=spenddat --cov-report=term-missing
+      - run: python tools/sandbox_demo.py
+
+  stripe-sandbox:
+    # Real Stripe TEST-mode calls; runs only if test credentials are configured.
+    runs-on: ubuntu-latest
+    if: ${{ vars.RUN_STRIPE_SANDBOX == 'true' }}
+    env:
+      SPENDDAT_MODE: sandbox
+      STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+      STRIPE_TEST_PAYMENT_METHOD_ID: ${{ secrets.STRIPE_TEST_PAYMENT_METHOD_ID }}
+      STRIPE_TEST_SELLER_PROFILE: ${{ secrets.STRIPE_TEST_SELLER_PROFILE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -e ".[dev]"
+      - run: pytest -m stripe_sandbox
