@@ -43,6 +43,32 @@ make demo          # both PRD flows end-to-end over HTTP against a local ACP mer
 autonomous purchase) and an over-cap request (ESCALATE → approval → purchase), and prints
 both audit trails.
 
+## Web UI (dashboard + chat)
+
+```bash
+spenddat ui --demo        # sandbox demo, no credentials: opens http://127.0.0.1:8420
+spenddat ui               # your configured sandbox/live setup (same checks as the CLI)
+```
+
+Two views, switched with the control at the top:
+
+* **Dashboard** — spend today/this week against budgets, share of purchases handled
+  autonomously, a 14-day spend chart (autonomous vs approved by you), the decision mix,
+  searchable transaction history with a full audit-trail drawer per transaction, pending
+  approvals with Approve / Approve up to $X / Deny, and every guardrail with live usage.
+* **Chat** — talk to the agent: "buy a clear phone case for my iPhone 15 under $25",
+  "how much have I spent?", "what's pending?", "show recent orders", "what are my limits?".
+  Receipts, approval requests and denials appear as cards you can act on in place.
+
+The demo runs everything in-process: the bundled reference ACP store, a second "stub"
+store, sandbox-only fake payments, and a week of sample history (`--reset` starts over,
+`--no-seed` starts empty). Without `SPENDDAT_SANDBOX_ANTHROPIC_API_KEY` it understands
+requests with a small offline keyword parser; set the key to use Claude instead.
+
+The UI uses the same orchestrator as the CLI, so every policy, approval, ceiling and audit
+guarantee is unchanged. The server binds to 127.0.0.1 only, rejects foreign `Host`
+headers, and requires a same-origin custom header on every state-changing request.
+
 ## Configuration
 
 | What | Where | Notes |
@@ -116,7 +142,7 @@ caps:                        # integer cents
   daily_minor: 15000         # rolling 24h, committed + in-flight spend
   weekly_minor: 40000        # rolling 7d
 anomaly:
-  price_deviation_pct: 40    # unit price vs rolling avg of past purchases (same SKU, else category)
+  price_deviation_pct: 40    # unit price vs rolling avg of past purchases of the same item (vendor + SKU)
   min_history: 3             # purchases needed before the price rule applies
   history_days: 30
   velocity: {max_purchases: 5, window_minutes: 60}
@@ -188,7 +214,8 @@ src/spenddat/
   secrets.py           mode-namespaced secrets (env / secrets-manager CLI)
   observability.py     JSON logs, correlation ids, redaction
   sandbox/             reference ACP merchant (sandbox only)
+  ui/                  local web app: JSON API, chat service, static dashboard + chat
   cli.py
-tests/                 153 tests (+1 opt-in Stripe test-mode test); tests/contract = adapter contract suite
+tests/                 167 tests (+1 opt-in Stripe test-mode test); tests/contract = adapter contract suite
 docs/                  architecture, ADRs, runbooks
 ```

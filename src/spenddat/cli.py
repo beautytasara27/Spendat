@@ -219,6 +219,39 @@ def cmd_sandbox_merchant(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    import logging
+
+    from spenddat.ui.server import serve
+
+    logging.getLogger("spenddat").setLevel(logging.WARNING)
+    from spenddat.ui.service import UiService
+
+    if args.demo:
+        from spenddat.ui.demo import build_demo
+
+        db = args.db or "data/ui-demo.db"
+        if args.reset:
+            from pathlib import Path
+
+            for suffix in ("", "-wal", "-shm"):
+                p = Path(db + suffix)
+                if p.exists():
+                    p.rename(p.with_name(p.name + ".old"))
+        orch, label = build_demo(db, Settings.from_env().policy_file, seed=not args.no_seed)
+    else:
+        orch = build_orchestrator()
+        label = f"Claude ({Settings.from_env().llm_model})"
+    serve(
+        UiService(orch, llm_label=label),
+        args.host,
+        args.port,
+        open_browser=not args.no_browser,
+        allow_remote=args.allow_remote,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="spenddat", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -266,6 +299,25 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_reconcile
     )
     sub.add_parser("check", help="run startup configuration checks").set_defaults(func=cmd_check)
+
+    u = sub.add_parser("ui", help="open the web dashboard and chat")
+    u.add_argument(
+        "--demo",
+        action="store_true",
+        help="sandbox demo: built-in store, fake payments, no credentials needed",
+    )
+    u.add_argument("--reset", action="store_true", help="(demo) start from a fresh database")
+    u.add_argument("--no-seed", action="store_true", help="(demo) don't add sample history")
+    u.add_argument("--db", help="(demo) database path, default data/ui-demo.db")
+    u.add_argument("--host", default="127.0.0.1")
+    u.add_argument("--port", type=int, default=8420)
+    u.add_argument("--no-browser", action="store_true")
+    u.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow binding a non-loopback address (not recommended)",
+    )
+    u.set_defaults(func=cmd_ui)
 
     m = sub.add_parser("sandbox-merchant", help="run the reference ACP merchant locally")
     m.add_argument("--host", default="127.0.0.1")

@@ -24,7 +24,7 @@ spenddat = "spenddat.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-spenddat = ["py.typed"]
+spenddat = ["py.typed", "ui/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

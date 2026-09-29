@@ -37,7 +37,7 @@ caps:
   weekly_minor: 40000                  # $400.00 rolling 7d
 
 anomaly:
-  price_deviation_pct: 40              # unit price vs rolling average of past purchases
+  price_deviation_pct: 40              # unit price vs rolling average of past purchases of the same item
   min_history: 3                       # need this many past purchases before judging price
   history_days: 30
   velocity:

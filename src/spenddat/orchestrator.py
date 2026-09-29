@@ -54,7 +54,7 @@ from spenddat.models import (
 )
 from spenddat.observability import current_mode, current_txn, get_logger, log
 from spenddat.payments import PaymentError, PaymentProvider, ScopedCredential
-from spenddat.policy import PolicyEngine
+from spenddat.policy import Policy, PolicyEngine
 from spenddat.vendors.base import (
     AdapterRegistry,
     PaymentHandle,
@@ -127,6 +127,29 @@ class Orchestrator:
         self._limits = hard_limits
         self._ship_to = ship_to
         self._now = clock
+
+    # ================================================================== read-only views
+
+    @property
+    def policy(self) -> Policy:
+        return self._engine.policy
+
+    @property
+    def hard_limits(self) -> HardLimits:
+        return self._limits
+
+    @property
+    def ship_to(self) -> Address | None:
+        return self._ship_to
+
+    def vendor_ids(self) -> list[str]:
+        return self._registry.vendor_ids()
+
+    def now(self) -> datetime:
+        return self._now()
+
+    def snapshot(self, txn_id: str) -> dict[str, Any]:
+        return self._snapshot(txn_id)
 
     # ================================================================== helpers
 
@@ -259,7 +282,12 @@ class Orchestrator:
             self._event(txn_id, "item_resolved", {"item": item.model_dump(mode="json")})
 
         facts = self._facts(intent, item, len(candidates), ambiguous=ambiguous)
-        return self._decide(txn_id, intent, facts, item, candidates[1:] if ambiguous else [])
+        alternatives = (
+            [c for c in candidates[1:] if candidates[0].score - c.score < AMBIGUITY_MARGIN]
+            if ambiguous
+            else []
+        )
+        return self._decide(txn_id, intent, facts, item, alternatives)
 
     def _facts(
         self, intent: PurchaseIntent, item: ResolvedItem | None, n: int, *, ambiguous: bool

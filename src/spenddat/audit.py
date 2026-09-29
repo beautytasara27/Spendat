@@ -279,17 +279,21 @@ class AuditStore:
         since: datetime,
         min_history: int,
     ) -> int | None:
-        """Rolling average unit price of completed purchases: same SKU, else same category."""
-        for col, val in (("sku", sku), ("category", category)):
-            if val is None:
-                continue
-            rows = self._db.execute(
-                f"SELECT unit_price_minor FROM transactions WHERE mode=? AND state=? "  # noqa: S608
-                f"AND {col}=? AND unit_price_minor IS NOT NULL AND completed_at >= ?",
-                (mode.value, TxnState.COMPLETED.value, val, since.isoformat()),
-            ).fetchall()
-            if len(rows) >= min_history:
-                return round(sum(r["unit_price_minor"] for r in rows) / len(rows))
+        """Rolling average unit price of completed purchases of the same vendor + SKU.
+
+        Deliberately item-level only: averaging different products in one category (a $13
+        cable and a $90 headset) produces a meaningless baseline that flags normal prices.
+        ``category`` is accepted for interface stability but not used.
+        """
+        if sku is None:
+            return None
+        rows = self._db.execute(
+            "SELECT unit_price_minor FROM transactions WHERE mode=? AND state=? AND vendor=? "
+            "AND sku=? AND unit_price_minor IS NOT NULL AND completed_at >= ?",
+            (mode.value, TxnState.COMPLETED.value, vendor, sku, since.isoformat()),
+        ).fetchall()
+        if len(rows) >= min_history:
+            return round(sum(r["unit_price_minor"] for r in rows) / len(rows))
         return None
 
     # ------------------------------------------------------------------ approvals
