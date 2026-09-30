@@ -15,6 +15,7 @@ from spenddat.config import LIVE_CONFIRM_VALUE, Settings, StartupError, build_or
 from spenddat.config import startup_checks as checks
 from spenddat.models import RuntimeMode
 from spenddat.observability import JsonFormatter, current_mode, current_txn, redact
+from spenddat.policy import load_policy
 from spenddat.secrets import CommandSecrets, EnvSecrets, build_secrets
 from spenddat.vendors import build_adapter
 from tests.conftest import POLICY_FILE, ROOT
@@ -227,3 +228,105 @@ def test_placeholder_vendor_config_is_rejected(files):
     v.write_text(v.read_text().replace("profile_live_x", "profile_REPLACE_ME"))
     with pytest.raises(StartupError, match="placeholder"):
         _check(_live_env(files))
+
+
+# ----------------------------------------------------------------------------- model provider
+
+
+def test_openrouter_key_alone_satisfies_live_checks(files):
+    env = _live_env(files, SPENDDAT_LIVE_ANTHROPIC_API_KEY=None)
+    env["SPENDDAT_LIVE_OPENROUTER_API_KEY"] = "sk-or-abc"
+    _check(env)
+
+
+def test_explicit_provider_requires_its_own_key(files):
+    env = _live_env(files, SPENDDAT_LLM_PROVIDER="openrouter")
+    with pytest.raises(StartupError, match="openrouter_api_key"):
+        _check(env)
+
+
+@pytest.mark.parametrize(
+    "env,provider,model",
+    [
+        ({"SPENDDAT_SANDBOX_OPENROUTER_API_KEY": "k"}, "openrouter", "anthropic/claude-sonnet-5.5"),
+        ({"SPENDDAT_SANDBOX_ANTHROPIC_API_KEY": "k"}, "anthropic", "claude-sonnet-5-5"),
+        (
+            {"SPENDDAT_SANDBOX_OPENROUTER_API_KEY": "k", "SPENDDAT_SANDBOX_ANTHROPIC_API_KEY": "k"},
+            "openrouter",
+            "anthropic/claude-sonnet-5.5",
+        ),
+        (
+            {
+                "SPENDDAT_SANDBOX_OPENROUTER_API_KEY": "k",
+                "SPENDDAT_LLM_MODEL": "anthropic/claude-haiku-4.5",
+            },
+            "openrouter",
+            "anthropic/claude-haiku-4.5",
+        ),
+        ({}, None, None),
+    ],
+)
+def test_choose_llm(env, provider, model):
+    from spenddat.llm import choose_llm
+
+    c = choose_llm(env, EnvSecrets(RuntimeMode.SANDBOX, env))
+    assert (c.provider, c.model) == (provider, model)
+
+
+def test_dotenv_loading(tmp_path):
+    from spenddat.dotenv import load_dotenv
+
+    f = tmp_path / ".env"
+    f.write_text(
+        "# comment\nSPENDDAT_A=1\nexport SPENDDAT_B='two words'\nSPENDDAT_C=x # note\n"
+        "SPENDDAT_D=keep\n\nnot a line\n"
+    )
+    env = {"SPENDDAT_D": "real"}
+    loaded = load_dotenv(f, env)
+    assert env == {
+        "SPENDDAT_A": "1",
+        "SPENDDAT_B": "two words",
+        "SPENDDAT_C": "x",
+        "SPENDDAT_D": "real",
+    }
+    assert "SPENDDAT_D" not in loaded
+    assert load_dotenv(tmp_path / "missing", env) == []
+
+
+def test_store_config_preserves_comments_and_validates(tmp_path):
+    from spenddat.stores import StoreConfig, StoreConfigError
+
+    vendors = tmp_path / "v.yaml"
+    vendors.write_text((ROOT / "config" / "vendors.yaml").read_text())
+    policy = tmp_path / "p.yaml"
+    policy.write_text(POLICY_FILE.read_text())
+    cfg = StoreConfig(vendors, policy, RuntimeMode.LIVE)
+    cfg.set_trust("acp_merchant", "blocked")
+    text = policy.read_text()
+    assert "# Hard blocks" in text and "acp_merchant" in text.split("deny:")[1].split("\n")[0]
+    assert cfg.trust_of("acp_merchant") == "blocked"
+    with pytest.raises(StoreConfigError, match="https"):
+        cfg.add(
+            {
+                "name": "Shop",
+                "type": "acp",
+                "base_url": "http://x.example/acp",
+                "feed_url": "https://x.example/f",
+                "seller_profile": "profile_abc",
+            }
+        )
+    with pytest.raises(StoreConfigError, match="sandbox"):
+        cfg.add({"name": "Demo", "type": "reference"})
+    vid = cfg.add(
+        {
+            "name": "Real Shop",
+            "type": "acp",
+            "base_url": "https://x.example/acp",
+            "feed_url": "https://x.example/f.json",
+            "seller_profile": "profile_abc",
+        }
+    )
+    assert vid == "real_shop" and cfg.trust_of(vid) == "ask"
+    assert cfg.secret_env_name(vid) == "SPENDDAT_LIVE_REAL_SHOP_API_KEY"
+    assert "# Vendor integrations" in vendors.read_text()
+    load_policy(policy)  # still a valid policy

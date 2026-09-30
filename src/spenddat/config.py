@@ -19,7 +19,8 @@ import yaml
 from spenddat.approval import ApprovalService, ConsoleNotifier, Notifier, WebhookNotifier
 from spenddat.audit import AuditStore
 from spenddat.guards import HardLimits
-from spenddat.intent import AnthropicClient, IntentParser, LlmClient
+from spenddat.intent import IntentParser, LlmClient
+from spenddat.llm import build_llm, choose_llm
 from spenddat.models import Address, RuntimeMode
 from spenddat.orchestrator import Orchestrator
 from spenddat.payments import FakePaymentProvider, PaymentProvider, StripeSharedPaymentTokens
@@ -29,7 +30,6 @@ from spenddat.vendors import build_adapter
 from spenddat.vendors.base import AdapterRegistry
 
 LIVE_CONFIRM_VALUE = "I_ACCEPT_REAL_PURCHASES"
-DEFAULT_LLM_MODEL = "claude-sonnet-5-5"
 
 
 class StartupError(RuntimeError):
@@ -45,7 +45,7 @@ class Settings:
     profile_file: str
     hard_limits: HardLimits
     payment_backend: str
-    llm_model: str
+    llm_provider: str
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
@@ -73,7 +73,7 @@ class Settings:
             profile_file=e.get("SPENDDAT_PROFILE_FILE", "config/profile.yaml"),
             hard_limits=limits,
             payment_backend=e.get("SPENDDAT_PAYMENT_BACKEND", "stripe"),
-            llm_model=e.get("SPENDDAT_LLM_MODEL", DEFAULT_LLM_MODEL),
+            llm_provider=e.get("SPENDDAT_LLM_PROVIDER", "auto"),
         )
 
 
@@ -107,11 +107,21 @@ def startup_checks(settings: Settings, secrets: SecretsProvider, env: dict[str, 
         pm = secrets.get("stripe_payment_method_id") or ""
         if not pm.startswith("pm_"):
             problems.append("missing or malformed secret stripe_payment_method_id (pm_...)")
-    if not secrets.get("anthropic_api_key"):
-        problems.append("missing secret anthropic_api_key (intent parsing)")
+    try:
+        choice = choose_llm(env, secrets)
+        if not choice.provider:
+            problems.append(
+                "no model key: set secret openrouter_api_key or anthropic_api_key (intent parsing)"
+            )
+        elif choice.secret_name and not secrets.get(choice.secret_name):
+            problems.append(f"missing secret {choice.secret_name} (intent parsing)")
+    except ValueError as err:
+        problems.append(str(err))
     try:
         vendors = _load_yaml(settings.vendors_file, "vendors").get("vendors", [])
         for v in vendors:
+            if not v.get("enabled", True):
+                continue
             section = v.get(settings.mode.value)
             if not section:
                 problems.append(f"vendor {v.get('id')} has no '{settings.mode.value}' section")
@@ -166,7 +176,8 @@ def build_orchestrator(
     if registry is None:
         registry = AdapterRegistry()
         for v in _load_yaml(settings.vendors_file, "vendors").get("vendors", []):
-            registry.register(build_adapter(v, settings.mode, secrets, buyer))
+            if v.get("enabled", True):
+                registry.register(build_adapter(v, settings.mode, secrets, buyer))
 
     if payments is None:
         if settings.payment_backend == "fake":
@@ -179,7 +190,7 @@ def build_orchestrator(
             )
 
     if llm is None:
-        llm = AnthropicClient(require(secrets, "anthropic_api_key"), settings.llm_model)
+        llm = build_llm(choose_llm(e, secrets), secrets)
 
     if notifiers is None:
         notifiers = [ConsoleNotifier()]
@@ -193,6 +204,7 @@ def build_orchestrator(
         supported_vendors=set(registry.vendor_ids()) | policy.vendors.deny,
         autonomous_vendors=policy.vendors.allow,
         supported_categories=supported_categories,
+        vendor_names=registry.display_names(),
     )
     approvals = ApprovalService(
         store, notifiers, timedelta(minutes=policy.approval.timeout_minutes)

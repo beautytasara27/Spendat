@@ -163,18 +163,147 @@ def test_demo_refuses_live(monkeypatch, tmp_path):
 
     monkeypatch.setenv("SPENDDAT_MODE", "live")
     with pytest.raises(RuntimeError, match="sandbox"):
-        build_demo(str(tmp_path / "d.db"), "policies/default.yaml")
+        build_demo(tmp_path / "demo", "policies/default.yaml")
 
 
-def test_demo_seeds_history(monkeypatch, tmp_path):
+@pytest.fixture
+def demo(monkeypatch, tmp_path):
     from spenddat.ui.demo import build_demo
     from tests.conftest import POLICY_FILE
 
-    monkeypatch.delenv("SPENDDAT_SANDBOX_ANTHROPIC_API_KEY", raising=False)
+    for k in (
+        "SPENDDAT_SANDBOX_ANTHROPIC_API_KEY",
+        "SPENDDAT_SANDBOX_OPENROUTER_API_KEY",
+        "SPENDDAT_LLM_PROVIDER",
+    ):
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("SPENDDAT_MODE", "sandbox")
-    orch, label = build_demo(str(tmp_path / "d.db"), str(POLICY_FILE))
-    svc = UiService(orch, llm_label=label)
+    app = build_demo(tmp_path / "demo", str(POLICY_FILE))
+    return app, UiService(
+        app.orch, llm_label=app.label, config=app.config, rebuild=app.rebuild, demo=True
+    )
+
+
+def test_demo_seeds_history(demo):
+    app, svc = demo
     states = {t["state"] for t in svc.transactions(None)}
     assert {"completed", "denied", "pending_approval", "approval_denied"} <= states
     assert svc.summary()["audit"]["ok"]
     assert json.dumps(svc.summary())  # serialisable
+    assert app.label == "offline demo parser"
+
+
+def test_demo_policy_is_a_copy(demo):
+    from tests.conftest import POLICY_FILE
+
+    app, _ = demo
+    assert app.config.policy_file != POLICY_FILE
+    assert app.config.policy_file.read_text() == POLICY_FILE.read_text()
+
+
+def blocks_of(svc, text, cid="c"):
+    return svc.chat(cid, text)["blocks"]
+
+
+def test_samba_request_end_to_end(demo):
+    """The exact request that used to fail: sizes, colours, multi-store search."""
+    _, svc = demo
+    b = blocks_of(svc, "buy adidas sambas if they are under $100 size 8.5 in white")
+    appr = next(x for x in b if x["type"] == "approval")
+    item = appr["item"]
+    assert item["vendor"] == "sneaker_street"
+    assert item["sku"] == "SAMBA-OG-WHT-8_5"
+    assert "White" in item["title"] and "8.5" in item["title"]
+    assert item["unit_price_minor"] == 10000
+    # $104.99 with shipping is over the $50 per-purchase and footwear caps -> asks you
+    assert any("cap" in r for r in appr["reasons"])
+
+
+def test_unknown_store_gets_a_clear_answer(demo):
+    _, svc = demo
+    b = blocks_of(svc, "buy adidas sambas size 8.5 in white from adidas shop")
+    assert "not connected to a store called 'adidas shop'" in b[0]["text"]
+    assert "Sneaker Street" in b[0]["text"] and "Stores page" in b[0]["text"]
+
+
+def test_variant_questions(demo):
+    _, svc = demo
+    q = blocks_of(svc, "buy adidas sambas in white", "v1")[0]
+    assert q["tone"] == "ask" and "What size" in q["text"] and "8.5" in q["text"]
+    # answering the follow-up completes the request (conversation memory)
+    follow = blocks_of(svc, "8.5", "v1")
+    assert any(x["type"] == "approval" for x in follow)
+    sold_out = blocks_of(svc, "buy adidas sambas in green size 8.5", "v2")[0]
+    assert "isn't available in green in size 8.5" in sold_out["text"]
+    assert "In green it comes in sizes 6, 6.5, 7, 7.5, 8, 9" in sold_out["text"]
+    assert "size 8.5 comes in Black, White" in sold_out["text"]
+    colour = blocks_of(svc, "buy nike air force 1 size 9", "v3")[0]
+    assert "Which colour" in colour["text"]
+
+
+def test_unsupported_item_is_explained_not_questioned(demo):
+    _, svc = demo
+    b = blocks_of(svc, "buy a garden hose")
+    assert b[0]["tone"] == "warn" and "category" in b[0]["text"]
+
+
+def test_any_store_search_picks_across_stores(demo):
+    _, svc = demo
+    b = blocks_of(svc, "buy a felt desk mat")  # only Desk & Co sells it
+    appr = next(x for x in b if x["type"] == "approval")
+    assert appr["item"]["vendor"] == "stub_vendor"
+    assert any("vendor_not_preapproved" in r for r in appr["reasons"])
+
+
+def test_store_trust_changes_decisions_and_is_audited(demo):
+    app, svc = demo
+    svc.change_store("update", "stub_vendor", {"trust": "auto"})
+    assert "stub_vendor" in app.config.policy_file.read_text()
+    b = blocks_of(svc, "buy a gel pen pack from desk & co")
+    assert any(x["type"] == "receipt" and x["basis"] == "policy_allow" for x in b)
+    svc.change_store("update", "stub_vendor", {"trust": "blocked"})
+    b = blocks_of(svc, "buy a gel pen pack from desk & co")
+    assert b[0]["type"] == "denied"
+    ev = [e for e in svc.orch.store.events("config") if e.event_type == "stores_changed"]
+    assert len(ev) == 2 and ev[-1].payload["after"]["trust"] == "blocked"
+    assert ev[-1].payload["policy_version_before"] != ev[-1].payload["policy_version_after"]
+    assert svc.orch.store.verify_chain()
+
+
+def test_disable_add_and_remove_store(demo):
+    _, svc = demo
+    svc.change_store("update", "sneaker_street", {"enabled": False})
+    b = blocks_of(svc, "buy adidas sambas size 8.5 in white")
+    assert "couldn't find" in b[0]["text"]
+    svc.change_store("update", "sneaker_street", {"enabled": True})
+    out = svc.change_store(
+        "add",
+        None,
+        {"name": "Kicks Two", "type": "reference", "catalog": "sneakers", "trust": "auto"},
+    )
+    assert out["store"]["id"] == "kicks_two" and out["store"]["trust"] == "auto"
+    listing = svc.stores(check=True)["stores"]
+    kicks = next(s for s in listing if s["id"] == "kicks_two")
+    assert kicks["loaded"] and kicks["health"]["ok"] and kicks["health"]["products"] > 50
+    svc.change_store("remove", "kicks_two", {})
+    assert all(s["id"] != "kicks_two" for s in svc.stores()["stores"])
+
+
+def test_bad_store_change_is_rolled_back(demo):
+    from spenddat.stores import StoreConfigError
+
+    app, svc = demo
+    before = app.config.snapshot()
+    with pytest.raises(StoreConfigError):
+        svc.change_store("add", None, {"name": "Real Shop", "type": "acp", "base_url": "not a url"})
+    with pytest.raises(StoreConfigError, match="change not applied"):
+        svc.change_store("add", None, {"name": "Broken", "type": "reference", "catalog": "nope"})
+    assert app.config.snapshot() == before
+
+
+def test_store_api_over_http(ui):
+    _, c = ui
+    r = c.get("/api/stores")
+    assert r.status_code == 200 and r.json()["editable"] is False
+    r = c.post("/api/stores/sneaker_street", json={"trust": "auto"})
+    assert r.status_code == 400

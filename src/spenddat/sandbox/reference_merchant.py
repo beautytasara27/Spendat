@@ -145,10 +145,11 @@ class ReferenceMerchant:
                 "title": p["title"],
                 "description": p["description"],
                 "price": _price_str(p["price_minor"]),
-                "availability": "in_stock",
+                "availability": p.get("availability", "in_stock"),
                 "product_category": p["product_category"],
                 "enable_checkout": True,
                 "link": f"https://merchant.example/p/{p['id']}",
+                **{k: p[k] for k in ("item_group_id", "size", "color") if p.get(k)},
             }
             for p in self.catalog.values()
         ]
@@ -246,7 +247,11 @@ class ReferenceMerchant:
     def _create(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         items = body.get("items") or []
         for it in items:
-            if it.get("id") not in self.catalog or int(it.get("quantity", 0)) < 1:
+            if (
+                it.get("id") not in self.catalog
+                or int(it.get("quantity", 0)) < 1
+                or self.catalog[it["id"]].get("availability", "in_stock") != "in_stock"
+            ):
                 return 400, {
                     "type": "invalid_request",
                     "code": "invalid_item",

@@ -1,0 +1,25 @@
+# Demo stores (sandbox only). Copied to data/demo/stores.yaml on first run; the Stores page
+# edits that copy. "reference" stores are bundled agent-checkout (ACP) stores that run
+# in-process with fake payments - no network, no keys.
+vendors:
+  - id: acp_merchant
+    name: Everyday Goods
+    type: reference
+    enabled: true
+    sandbox:
+      catalog: everyday
+  - id: sneaker_street
+    name: Sneaker Street
+    type: reference
+    enabled: true
+    sandbox:
+      catalog: sneakers
+  - id: stub_vendor
+    name: Desk & Co
+    type: stub
+    enabled: true
+    sandbox:
+      catalog:
+        - {sku: STUB-PEN-10, title: Gel Pen 10 Pack, price_minor: 899}
+        - {sku: STUB-DESK-MAT, title: Felt Desk Mat, price_minor: 2299}
+        - {sku: STUB-MONITOR-27, title: 27 inch 4K Monitor, price_minor: 32999}

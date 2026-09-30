@@ -2,7 +2,9 @@
 # the secrets backend as SPENDDAT_<MODE>_<NAME> (env backend) or via SPENDDAT_SECRETS_COMMAND.
 vendors:
   - id: acp_merchant
+    name: Reference Store          # shown in the UI and understood in chat ("from ...")
     type: acp                      # Agentic Commerce Protocol merchant (official API)
+    enabled: true                  # the Stores page toggles this
     sandbox:
       # Reference merchant: `spenddat sandbox-merchant`, or a merchant's ACP staging URL.
       base_url: http://127.0.0.1:8787

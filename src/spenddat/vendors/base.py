@@ -22,6 +22,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from spenddat.models import Address, Candidate, OrderStatus, Receipt, ResolvedItem, RuntimeMode
 
@@ -47,6 +48,11 @@ class PaymentHandle:
 class VendorAdapter(ABC):
     vendor_id: str
     integration: str  # "api" | "browser"
+    display_name: str | None = None
+
+    @property
+    def name(self) -> str:
+        return self.display_name or self.vendor_id.replace("_", " ").title()
 
     @abstractmethod
     def search(self, query: str, limit: int = 5) -> list[Candidate]: ...
@@ -61,6 +67,10 @@ class VendorAdapter(ABC):
 
     @abstractmethod
     def order_status(self, vendor_ref: str) -> tuple[OrderStatus, Receipt | None]: ...
+
+    def health_check(self) -> dict[str, Any]:
+        """Cheap reachability probe for the Stores page. Raise VendorError if unreachable."""
+        return {"ok": True}
 
     def cancel(self, vendor_ref: str) -> None:  # noqa: B027 - optional hook
         """Best-effort release of an unpurchased cart."""
@@ -85,3 +95,6 @@ class AdapterRegistry:
 
     def vendor_ids(self) -> list[str]:
         return sorted(self._adapters)
+
+    def display_names(self) -> dict[str, str]:
+        return {v: self._adapters[v].name for v in self.vendor_ids()}

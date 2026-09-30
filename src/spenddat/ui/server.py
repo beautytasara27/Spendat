@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -90,6 +91,9 @@ def make_handler(service: UiService, allowed_hosts: set[str]) -> type[BaseHTTPRe
                     return self._json(200, d) if d else self._json(404, {"error": "not found"})
                 if path == "/api/approvals":
                     return self._json(200, service.approvals())
+                if path == "/api/stores":
+                    check = q.get("check", ["0"])[0] == "1"
+                    return self._json(200, service.stores(check=check))
                 return self._static(path)
             except Exception as e:
                 return self._json(500, {"error": f"{type(e).__name__}: {e}"})
@@ -120,6 +124,12 @@ def make_handler(service: UiService, allowed_hosts: set[str]) -> type[BaseHTTPRe
                         quantity=_int_or_none(body.get("quantity")),
                     )
                     return self._json(200, {"blocks": blocks})
+                if path == "/api/stores":
+                    return self._json(200, service.change_store("add", None, body))
+                m = re.fullmatch(r"/api/stores/([a-z][a-z0-9_]{1,39})(/remove)?", path)
+                if m:
+                    action = "remove" if m.group(2) else "update"
+                    return self._json(200, service.change_store(action, m.group(1), body))
                 return self._json(404, {"error": "not found"})
             except (ValueError, json.JSONDecodeError) as e:
                 return self._json(400, {"error": str(e)})

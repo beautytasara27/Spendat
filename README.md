@@ -60,10 +60,46 @@ Two views, switched with the control at the top:
   "how much have I spent?", "what's pending?", "show recent orders", "what are my limits?".
   Receipts, approval requests and denials appear as cards you can act on in place.
 
+A third view, **Stores**, manages where the agent shops: add a store, turn it on or
+off, and set its trust level — **Auto-buy** (in-policy purchases complete on their own),
+**Ask me** (every purchase needs your approval) or **Blocked**. Trust levels are written
+into your policy's `vendors.allow` / `vendors.deny` lists (comments preserved), the change
+is recorded in the audit log, and the app reloads; if the new setup doesn't load, the
+change is rolled back. When a request doesn't name a store, the agent searches every
+enabled, non-blocked store and picks the best match, preferring Auto-buy stores, then the
+lowest price. Sizes and colours are understood ("size 8.5 in white"); if a product comes
+in several sizes or colours and you didn't say, it asks, and if yours is sold out it says
+which sizes/colours are available.
+
 The demo runs everything in-process: the bundled reference ACP store, a second "stub"
 store, sandbox-only fake payments, and a week of sample history (`--reset` starts over,
-`--no-seed` starts empty). Without `SPENDDAT_SANDBOX_ANTHROPIC_API_KEY` it understands
-requests with a small offline keyword parser; set the key to use Claude instead.
+`--no-seed` starts empty; demo files live in `data/demo/`, including a *copy* of your
+policy, so demo trust changes never touch your real policy). Without a model key it
+understands requests with a small offline keyword parser; add an OpenRouter key (below)
+to use Claude.
+
+### Model provider (OpenRouter or Anthropic)
+
+Requests are turned into structured intents by Claude via either provider:
+
+| Provider | Secret | Default model |
+|---|---|---|
+| OpenRouter | `openrouter_api_key` | `anthropic/claude-sonnet-5.5` |
+| Anthropic | `anthropic_api_key` | `claude-sonnet-5-5` |
+
+`SPENDDAT_LLM_PROVIDER=auto` (default) uses OpenRouter when its key is present, otherwise
+Anthropic. Override the model with `SPENDDAT_LLM_MODEL` (for OpenRouter, a cheaper choice
+is `anthropic/claude-haiku-4.5`). Quick start on Windows:
+
+```cmd
+copy .env.example .env
+notepad .env        &:: add: SPENDDAT_SANDBOX_OPENROUTER_API_KEY=sk-or-...
+spenddat ui --demo
+```
+
+The chat header shows which model is in use. The model only sees the request text and
+the store/category names — never addresses, payment data or keys. It makes one call per
+purchase request; questions like "how much have I spent?" don't call it.
 
 The UI uses the same orchestrator as the CLI, so every policy, approval, ceiling and audit
 guarantee is unchanged. The server binds to 127.0.0.1 only, rejects foreign `Host`
@@ -79,9 +115,9 @@ headers, and requires a same-origin custom header on every state-changing reques
 | Vendors | `config/vendors.yaml` (`SPENDDAT_VENDORS_FILE`) | per-mode endpoints; no secrets |
 | Buyer profile | `config/profile.yaml` (`SPENDDAT_PROFILE_FILE`) | git-ignored; copy the example |
 | Hard ceilings | `SPENDDAT_HARD_MAX_{TRANSACTION,DAILY,WEEKLY}_MINOR` | circuit breakers, cents |
-| Secrets backend | `SPENDDAT_SECRETS_BACKEND=env\|command` | see *Secrets* |
+| Secrets backend | `SPENDDAT_SECRETS_BACKEND=env\|command` | see *Secrets*; a `.env` file is also loaded |
 | Payment backend | `SPENDDAT_PAYMENT_BACKEND=stripe\|fake` | `fake` refused in live |
-| LLM model | `SPENDDAT_LLM_MODEL` | default `claude-sonnet-5-5` |
+| Model provider | `SPENDDAT_LLM_PROVIDER`, `SPENDDAT_LLM_MODEL` | see *Model provider* |
 
 All variables are listed in [`.env.example`](.env.example).
 
@@ -118,7 +154,8 @@ Secrets are never in files. Names are namespaced by mode:
 |---|---|
 | `stripe_secret_key` | Stripe key; a **restricted** key with Shared Payment Tokens write is recommended |
 | `stripe_payment_method_id` | the buyer's saved PaymentMethod (`pm_…`) — a reference, not card data |
-| `anthropic_api_key` | intent parsing |
+| `openrouter_api_key` | intent parsing via OpenRouter (either this or the next) |
+| `anthropic_api_key` | intent parsing via Anthropic |
 | `acp_merchant_api_key` | bearer key issued by the merchant (name set in `vendors.yaml`) |
 | `approval_webhook_url` | optional Slack/Teams-style webhook for approval notifications |
 

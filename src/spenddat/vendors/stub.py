@@ -129,6 +129,9 @@ class StubAdapter(VendorAdapter):
                 raise VendorOutcomeUnknown("injected: order created but response lost")
             return receipt
 
+    def health_check(self) -> dict[str, object]:
+        return {"ok": True, "products": sum(1 for p in self._catalog.values() if p.in_stock)}
+
     def order_status(self, vendor_ref: str) -> tuple[OrderStatus, Receipt | None]:
         cart = self._carts.get(vendor_ref)
         if cart is None:

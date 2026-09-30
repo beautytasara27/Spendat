@@ -41,7 +41,42 @@ def _build_stub(
     return StubAdapter(vid, products, shipping_minor=int(cfg.get("shipping_minor", 0)))
 
 
-ADAPTER_BUILDERS: dict[str, Builder] = {"acp": _build_acp, "stub": _build_stub}
+_REFERENCE_MERCHANTS: dict[str, Any] = {}
+
+
+def _build_reference(
+    vid: str, cfg: dict[str, Any], _s: SecretsProvider, buyer: dict[str, str] | None
+) -> VendorAdapter:
+    """A bundled sandbox ACP store running in-process (no network, no keys)."""
+    import httpx
+
+    from spenddat.sandbox.catalogs import CATALOGS
+    from spenddat.sandbox.reference_merchant import ReferenceMerchant
+
+    catalog = cfg.get("catalog", "everyday")
+    if catalog not in CATALOGS:
+        raise ValueError(f"unknown demo catalog {catalog!r}; choose from {sorted(CATALOGS)}")
+    key = f"{vid}:{catalog}"
+    if key not in _REFERENCE_MERCHANTS:  # keep carts alive across config reloads
+        _REFERENCE_MERCHANTS[key] = ReferenceMerchant(api_key="demo_key", catalog=CATALOGS[catalog])
+    base = f"https://{vid.replace('_', '-')}.demo.test"
+    return AcpAdapter(
+        vendor_id=vid,
+        base_url=base,
+        feed_url=f"{base}/feed.json",
+        api_key="demo_key",
+        seller_profile=f"profile_test_{vid}",
+        buyer=buyer,
+        client=httpx.Client(transport=_REFERENCE_MERCHANTS[key].mock_transport(base)),
+    )
+
+
+ADAPTER_BUILDERS: dict[str, Builder] = {
+    "acp": _build_acp,
+    "stub": _build_stub,
+    "reference": _build_reference,
+}
+SANDBOX_ONLY_TYPES = {"stub", "reference"}
 
 
 def build_adapter(
@@ -50,9 +85,11 @@ def build_adapter(
     vtype = spec["type"]
     if vtype not in ADAPTER_BUILDERS:
         raise ValueError(f"unknown vendor type {vtype!r}")
-    if vtype == "stub" and mode is RuntimeMode.LIVE:
-        raise ValueError("stub vendors cannot be used in live mode")
-    return ADAPTER_BUILDERS[vtype](spec["id"], spec[mode.value], secrets, buyer)
+    if vtype in SANDBOX_ONLY_TYPES and mode is RuntimeMode.LIVE:
+        raise ValueError(f"{vtype} vendors cannot be used in live mode")
+    adapter = ADAPTER_BUILDERS[vtype](spec["id"], spec[mode.value], secrets, buyer)
+    adapter.display_name = spec.get("name") or None
+    return adapter
 
 
 __all__ = ["ADAPTER_BUILDERS", "AdapterRegistry", "VendorAdapter", "build_adapter"]

@@ -10,6 +10,7 @@ const money = (m) => (m == null ? "—" : `$${(m / 100).toLocaleString(undefined
 const moneyShort = (m) => (m == null ? "—" : m % 100 === 0 ? `$${(m / 100).toLocaleString()}` : money(m));
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const humanCat = (c) => (c || "").replace(/_/g, " ");
+const vname = (id) => (typeof S !== "undefined" && S.summary?.vendor_names?.[id]) || (id || "").replace(/_/g, " ");
 
 function ago(iso) {
   if (!iso) return "";
@@ -162,13 +163,15 @@ const S = { summary: null, txns: [], approvals: [], filter: "all", q: "" };
 
 /* ------------------------------------------------------------------ routing */
 function setView(v) {
-  const view = v === "chat" ? "chat" : "dashboard";
+  const view = ["chat", "stores"].includes(v) ? v : "dashboard";
   $("#view-dashboard").hidden = view !== "dashboard";
   $("#view-chat").hidden = view !== "chat";
+  $("#view-stores").hidden = view !== "stores";
   $(".segmented").dataset.active = view;
   $$(".segmented button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
   if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
   if (view === "chat") setTimeout(() => $("#input").focus(), 50);
+  else if (view === "stores") loadStores(true);
   else refresh();
 }
 $$(".segmented button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
@@ -205,10 +208,12 @@ function renderChrome() {
   const n = s.pending_approvals;
   $("#bell-count").textContent = n;
   $("#bell").classList.toggle("has", n > 0);
-  $("#agent-sub").textContent = `${s.mode === "live" ? "LIVE" : "Sandbox"} · understands requests with ${s.llm}`;
+  const storeCount = Object.keys(s.vendor_names || {}).length;
+  $("#agent-sub").textContent = `${s.mode === "live" ? "LIVE" : "Sandbox"} · ${storeCount} store${storeCount === 1 ? "" : "s"} · ${s.llm}`;
+  $("#agent-sub").title = Object.values(s.vendor_names || {}).join(", ");
   const h = new Date().getHours();
   $("#hello-eyebrow").textContent = `${h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"} · ${s.mode === "live" ? "Live" : "Sandbox"} mode`;
-  $("#foot").textContent = `Spenddat · policy ${s.policy.version} · stores: ${s.vendors.join(", ")}${s.ship_to ? ` · ships to ${s.ship_to}` : ""}`;
+  $("#foot").textContent = `Spenddat · policy ${s.policy.version} · stores: ${Object.values(s.vendor_names || {}).join(", ")}${s.ship_to ? ` · ships to ${s.ship_to}` : ""}`;
 }
 
 function ring(pct, label, grad) {
@@ -345,7 +350,7 @@ function renderFilters() {
 function txnRow(t, compact = false) {
   const title = t.title || t.request_text;
   const meta = compact ? `${ago(t.created_at)}` :
-    `${t.vendor ? esc(t.vendor.replace(/_/g, " ")) + " · " : ""}${t.category ? esc(humanCat(t.category)) + " · " : ""}${ago(t.created_at)}${t.approval?.decided_by && t.state === "completed" ? " · approved by you" : t.autonomous ? " · autonomous" : ""}`;
+    `${t.vendor ? esc(vname(t.vendor)) + " · " : ""}${t.category ? esc(humanCat(t.category)) + " · " : ""}${ago(t.created_at)}${t.approval?.decided_by && t.state === "completed" ? " · approved by you" : t.autonomous ? " · autonomous" : ""}`;
   const amtDim = t.state !== "completed";
   return `<div class="tr" role="row" tabindex="0" data-txn="${esc(t.txn_id)}">
     <div class="glyph">${CAT_ICON[t.category] || ICON.bag}</div>
@@ -378,7 +383,7 @@ function approvalCard(a, { inChat = false } = {}) {
   const id = a.approval_id;
   const inner = `
     <div class="appr-top"><div><div class="t">${esc(it.title)}</div>
-      <div class="v">${esc(it.vendor.replace(/_/g, " "))} · SKU ${esc(it.sku)} · qty ${it.quantity}</div></div>
+      <div class="v">${esc(vname(it.vendor))} · SKU ${esc(it.sku)} · qty ${it.quantity}</div></div>
       <div class="price">${money(it.total_minor)}</div></div>
     <div class="reasons">${reasons.map(reasonTag).join("")}</div>
     <p class="why">${reasons.map((r) => esc(reasonText(r))).join(" · ")}${alts.length ? `<br>Other matches: ${alts.map(esc).join("; ")}` : ""}</p>
@@ -471,7 +476,7 @@ async function openSheet(txnId) {
       <dl class="kv">
         <dt>Decision</dt><dd>${esc(t.outcome || "—")}${t.autonomous ? " · executed autonomously" : ""}</dd>
         ${t.approval ? `<dt>Approval</dt><dd>${esc(t.approval.status)}${t.approval.decided_by ? ` by ${esc(t.approval.decided_by)}` : ""}</dd>` : ""}
-        <dt>Store</dt><dd>${esc(t.vendor || "—")}</dd>
+        <dt>Store</dt><dd>${esc(t.vendor ? vname(t.vendor) : "—")}</dd>
         <dt>Category</dt><dd>${esc(humanCat(t.category) || "—")}</dd>
         ${t.order_id ? `<dt>Order</dt><dd><code>${esc(t.order_id)}</code></dd>` : ""}
         <dt>Mode</dt><dd>${esc(t.mode)}</dd>
@@ -499,7 +504,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet
 /* ------------------------------------------------------------------ chat */
 const SUGGEST = [
   [ICON.bag, "Buy a clear phone case", "for my iPhone 15, under $25", "Buy a clear phone case for my iPhone 15 under $25"],
-  [ICON.sparkle, "Buy noise cancelling headphones", "over budget, so I'll ask you first", "Buy noise cancelling wireless headphones"],
+  [ICON.sparkle, "Buy adidas Sambas", "white, size 8.5, under $100", "Buy adidas sambas if they are under $100 size 8.5 in white"],
   [ICON.gift, "Buy a $50 gift card", "see how restricted items are handled", "Buy a $50 gift card"],
   [ICON.chart, "How much have I spent?", "today and this week, against caps", "How much have I spent?"],
   [ICON.clock, "What's waiting for me?", "pending approvals", "What's pending?"],
@@ -540,7 +545,7 @@ function renderBlock(b) {
           <div><span>Shipping</span><b>${money(b.shipping_minor)}</b></div>
           <div><span>Tax</span><b>${money(b.tax_minor)}</b></div>
           <div class="total"><span>Total charged</span><b>${money(b.amount_minor)}</b></div></div>
-        <div class="foot-row"><span>${esc(b.vendor.replace(/_/g, " "))} · order ${esc(b.order_id)} · ${b.basis === "human_approval" ? "approved by you" : "autonomous"}${b.mode === "live" ? " · LIVE" : ""}</span>
+        <div class="foot-row"><span>${esc(vname(b.vendor))} · order ${esc(b.order_id)} · ${b.basis === "human_approval" ? "approved by you" : "autonomous"}${b.mode === "live" ? " · LIVE" : ""}</span>
           <button class="linkish" data-open="${esc(b.txn_id)}">Audit trail →</button></div></div>`;
     case "approval":
       return approvalCard(b, { inChat: true });
@@ -651,6 +656,153 @@ new ResizeObserver(() => {
   if (size === lastSize || !S.summary || $("#view-dashboard").hidden) return;
   lastSize = size; clearTimeout(rz); rz = setTimeout(renderChart, 60);
 }).observe($("#spend-chart"));
+
+/* ------------------------------------------------------------------ stores */
+const ST = { data: null, adding: false, addType: "acp", confirm: null };
+const MONO = [
+  "linear-gradient(135deg,#a78bfa,#6d28d9)", "linear-gradient(135deg,#f0abfc,#c026d3)",
+  "linear-gradient(135deg,#7dd3fc,#4f46e5)", "linear-gradient(135deg,#fda4af,#be185d)",
+  "linear-gradient(135deg,#6ee7b7,#0f766e)", "linear-gradient(135deg,#fcd34d,#c2410c)",
+];
+const hashIdx = (str, n) => [...str].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % n;
+const TYPE_LABEL = { acp: "Agent checkout", reference: "Demo store", stub: "Test store", browser: "Browser" };
+
+async function loadStores(check = false) {
+  try {
+    ST.data = await api(`/api/stores${check ? "?check=1" : ""}`);
+    renderStores();
+  } catch (e) { toast(`Couldn't load stores: ${e.message}`, "bad"); }
+}
+
+function storeCard(st) {
+  const h = st.health;
+  const health = !st.enabled ? `<span class="health"><i></i>Turned off</span>`
+    : !st.loaded ? `<span class="health bad"><i></i>Not loaded</span>`
+    : h == null ? `<span class="health"><i></i>Checking…</span>`
+    : h.ok ? `<span class="health ok"><i></i>Connected${h.products != null ? ` · ${h.products} products` : ""}</span>`
+    : `<span class="health bad" title="${esc(h.error)}"><i></i>Unreachable</span>`;
+  const where = st.type === "acp"
+    ? `<div>Checkout <code>${esc(st.base_url || "—")}</code></div>
+       ${st.secret_env ? `<div>API key from <code>${esc(st.secret_env)}</code></div>` : ""}`
+    : st.catalog ? `<div>Bundled catalog <code>${esc(typeof st.catalog === "string" ? st.catalog : "custom")}</code> · fake payments</div>` : "";
+  const confirming = ST.confirm === st.id;
+  return `<article class="glass store ${st.enabled ? "" : "off"}" data-store="${esc(st.id)}">
+    <div class="store-top">
+      <div class="monogram" style="background:${MONO[hashIdx(st.id, MONO.length)]}">${esc(st.name.slice(0, 1).toUpperCase())}</div>
+      <div class="store-id"><b>${esc(st.name)}</b><span>${esc(st.id)} · ${esc(TYPE_LABEL[st.type] || st.type)}</span></div>
+      <button class="switch" role="switch" aria-checked="${st.enabled}" aria-label="Enable ${esc(st.name)}" data-act="toggle"></button>
+    </div>
+    <div class="store-badges">${health}</div>
+    <div class="trust-seg" role="group" aria-label="Trust level">
+      ${[["auto", "Auto-buy"], ["ask", "Ask me"], ["blocked", "Blocked"]].map(([k, l]) =>
+        `<button data-trust="${k}" aria-pressed="${st.trust === k}">${l}</button>`).join("")}
+    </div>
+    <div class="store-meta">${where}</div>
+    <div class="store-actions">
+      <button class="btn ghost sm" data-act="test">${ICON.repeat}Test connection</button>
+      ${confirming
+        ? `<span class="confirm-row">Remove ${esc(st.name)}? <button class="btn danger sm" data-act="remove-yes">Remove</button><button class="btn ghost sm" data-act="remove-no">Cancel</button></span>`
+        : `<button class="btn ghost sm" data-act="remove">Remove</button>`}
+    </div>
+  </article>`;
+}
+
+function renderStores() {
+  const d = ST.data;
+  if (!d.editable) {
+    $("#store-list").innerHTML = `<div class="glass card empty">Store editing isn't available in this mode.</div>`;
+    $("#add-store-btn").hidden = true;
+    return;
+  }
+  $("#stores-eyebrow").textContent = `Stores · ${d.mode === "live" ? "Live" : "Sandbox"} mode${d.demo ? " · demo" : ""}`;
+  $("#store-list").innerHTML = d.stores.length ? d.stores.map(storeCard).join("")
+    : `<div class="glass card empty">No stores yet. Add one to start shopping.</div>`;
+  $("#stores-foot").textContent = `Stores file: ${d.vendors_file} · trust levels live in your policy: ${d.policy_file}. Every change is recorded in the audit log.`;
+  $$("#store-list .store").forEach(bindStore);
+  renderAddStore();
+}
+
+async function storeChange(path, body, okMsg) {
+  try {
+    await api(path, body);
+    toast(okMsg);
+    ST.confirm = null;
+    await loadStores(true);
+    refreshQuiet();
+  } catch (e) { toast(e.message, "bad"); await loadStores(false); }
+}
+
+function bindStore(card) {
+  const id = card.dataset.store;
+  const st = ST.data.stores.find((x) => x.id === id);
+  $("[data-act=toggle]", card).addEventListener("click", () =>
+    storeChange(`/api/stores/${id}`, { enabled: !st.enabled }, `${st.name} ${st.enabled ? "turned off" : "turned on"}`));
+  $$(".trust-seg button", card).forEach((b) => b.addEventListener("click", () => {
+    if (b.dataset.trust === st.trust) return;
+    const label = { auto: "can auto-buy", ask: "will ask you first", blocked: "is blocked" }[b.dataset.trust];
+    storeChange(`/api/stores/${id}`, { trust: b.dataset.trust }, `${st.name} ${label}`);
+  }));
+  $("[data-act=test]", card).addEventListener("click", async () => {
+    await loadStores(true);
+    const now = ST.data.stores.find((x) => x.id === id);
+    toast(now?.health?.ok ? `${st.name} is reachable` : `${st.name}: ${now?.health?.error || "not loaded"}`, now?.health?.ok ? "good" : "bad");
+  });
+  $("[data-act=remove]", card)?.addEventListener("click", () => { ST.confirm = id; renderStores(); });
+  $("[data-act=remove-no]", card)?.addEventListener("click", () => { ST.confirm = null; renderStores(); });
+  $("[data-act=remove-yes]", card)?.addEventListener("click", () =>
+    storeChange(`/api/stores/${id}/remove`, {}, `${st.name} removed`));
+}
+
+function renderAddStore() {
+  const box = $("#add-store");
+  box.hidden = !ST.adding;
+  if (!ST.adding) return;
+  const d = ST.data;
+  const t = ST.addType;
+  const types = [
+    ["acp", "Agent checkout store", "A shop that accepts AI-agent purchases (Agentic Commerce Protocol). Needs its checkout URL and an API key."],
+    ...(d.demo ? [["reference", "Demo store", "A bundled test shop with a ready-made catalog and fake payments."]] : []),
+    ["browser", "Any website (browser)", "The agent opens the site and clicks through checkout. Only for shops whose terms allow it."],
+  ];
+  box.innerHTML = `<header class="card-head"><div><h2>Add a store</h2><p class="sub">New stores start on “Ask me”, so nothing is bought there without you until you say so.</p></div>
+      <button class="btn ghost sm" data-act="close">${ICON.x}Close</button></header>
+    <div class="type-pick">${types.map(([k, b, s]) =>
+      `<button class="type-opt" data-type="${k}" aria-pressed="${t === k}" ${k === "browser" ? "disabled" : ""}><b>${b}</b><span>${s}</span>${k === "browser" ? '<span class="soon">COMING NEXT</span>' : ""}</button>`).join("")}</div>
+    <form id="store-form" class="form-grid" autocomplete="off">
+      <label class="field"><span>Store name</span><input name="name" required maxlength="60" placeholder="${t === "reference" ? "Kicks Outlet" : "e.g. Sneaker Street"}"></label>
+      <label class="field"><span>Trust</span><select name="trust"><option value="ask">Ask me (recommended)</option><option value="auto">Auto-buy</option><option value="blocked">Blocked</option></select></label>
+      ${t === "reference" ? `
+        <label class="field full"><span>Catalog</span><select name="catalog">${d.catalogs.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")}</select></label>` : `
+        <label class="field full"><span>Checkout URL <small>(the store's ACP base URL)</small></span><input name="base_url" type="url" required placeholder="https://shop.example.com/acp"></label>
+        <label class="field full"><span>Product feed URL</span><input name="feed_url" type="url" required placeholder="https://shop.example.com/acp/feed.json"></label>
+        <label class="field"><span>Seller payment profile <small>(Stripe, profile_…)</small></span><input name="seller_profile" required placeholder="profile_…"></label>
+        <label class="field"><span>API key secret name <small>(optional)</small></span><input name="api_key_secret" placeholder="auto: &lt;store_id&gt;_api_key"></label>`}
+    </form>
+    <div class="form-foot">
+      <p>${t === "acp" ? `API keys are never saved by this page. After adding, put the key in your <code>.env</code> file under the name shown on the store card, then restart.` : "Demo stores use fake payments and never charge anything."}</p>
+      <button class="btn primary" data-act="save">${ICON.check}Add store</button>
+    </div>`;
+  $("[data-act=close]", box).addEventListener("click", () => { ST.adding = false; renderAddStore(); });
+  $$(".type-opt:not(:disabled)", box).forEach((b) => b.addEventListener("click", () => { ST.addType = b.dataset.type; renderAddStore(); }));
+  $("[data-act=save]", box).addEventListener("click", async () => {
+    const f = $("#store-form");
+    if (!f.reportValidity()) return;
+    const body = Object.fromEntries(new FormData(f).entries());
+    body.type = t;
+    if (!body.api_key_secret) delete body.api_key_secret;
+    await storeChange("/api/stores", body, `${body.name} added`);
+    if (!$("#store-list").textContent.includes(body.name)) return;
+    ST.adding = false; renderAddStore();
+  });
+  setTimeout(() => $("input[name=name]", box)?.focus(), 30);
+}
+
+$("#add-store-btn").addEventListener("click", () => {
+  ST.adding = !ST.adding;
+  if (ST.adding) ST.addType = ST.data?.demo ? "reference" : "acp";
+  renderAddStore();
+  if (ST.adding) $("#add-store").scrollIntoView({ behavior: "smooth", block: "center" });
+});
 
 /* restore previous conversation */
 for (const e of chat.log.filter((x) => x.role)) addMessage(e.role, e.blocks, e.ts, false);

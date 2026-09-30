@@ -37,6 +37,8 @@ class PurchaseIntent(Frozen):
     quantity: int = Field(ge=1, le=100)
     max_price_minor: int | None = Field(default=None, ge=1, description="Per-order ceiling")
     currency: str = Field(default="usd", pattern=r"^[a-z]{3}$")
+    size: str | None = Field(default=None, max_length=32)
+    color: str | None = Field(default=None, max_length=40)
     constraints: tuple[str, ...] = ()
 
     @field_validator("vendor", "category")
@@ -79,6 +81,9 @@ class Candidate(Frozen):
     in_stock: bool = True
     url: str | None = None
     score: float = 0.0
+    group_id: str | None = Field(default=None, description="Variants of one product share it")
+    size: str | None = None
+    color: str | None = None
 
 
 class ResolvedItem(Frozen):

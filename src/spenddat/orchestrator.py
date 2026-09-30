@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from spenddat.audit import AuditStore
 from spenddat.guards import CircuitBreakerTripped, HardLimits, check_hard_limits
 from spenddat.intent import IntentParser
 from spenddat.models import (
+    ANY_ALLOWED_VENDOR,
     Address,
     ApprovalAction,
     ApprovalStatus,
@@ -77,6 +79,104 @@ def _one_line(a: Address | None) -> str:
         return "(none)"
     parts = [a.name, a.line_one, a.line_two, f"{a.city}, {a.state} {a.postal_code}", a.country]
     return ", ".join(p for p in parts if p)
+
+
+def _norm(v: str | None) -> str:
+    return re.sub(r"[^a-z0-9.]+", " ", (v or "").lower().replace("½", ".5")).strip()
+
+
+def _norm_size(v: str | None) -> str:
+    s = _norm(v)
+    s = re.sub(r"\b(us|uk|eu|size|sz|mens|men s|womens|women s)\b", " ", s)
+    return re.sub(r"\s+", "", s)
+
+
+def color_matches(have: str | None, want: str | None) -> bool:
+    if not want:
+        return True
+    if not have:
+        return False
+    h, w = set(_norm(have).split()), set(_norm(want).split())
+    return w <= h
+
+
+def product_key(c: Candidate) -> str:
+    return f"{c.vendor}:{c.group_id or _norm(c.title)}"
+
+
+def variant_label(c: Candidate) -> str:
+    parts = [p for p in (c.color, f"size {c.size}" if c.size else None) if p]
+    return ", ".join(parts)
+
+
+def select_variants(
+    intent: PurchaseIntent, candidates: list[Candidate]
+) -> tuple[list[Candidate], str | None]:
+    """Filter candidates by requested size/colour. Returns (kept, clarifying question)."""
+    if not any(c.size or c.color for c in candidates):
+        return candidates, None
+    want_size = _norm_size(intent.size) if intent.size else None
+    keep = [
+        c
+        for c in candidates
+        if (not want_size or not c.size or _norm_size(c.size) == want_size)
+        and (not intent.color or not c.color or color_matches(c.color, intent.color))
+    ]
+    if intent.color:
+        primary = [
+            c for c in keep if not c.color or color_matches(c.color.split("/")[0], intent.color)
+        ]
+        keep = primary or keep
+    top = max(candidates, key=lambda c: c.score)
+    family = [c for c in candidates if product_key(c) == product_key(top)]
+    sizes = sorted({c.size for c in family if c.size}, key=_size_sort)
+    colors = sorted({c.color for c in family if c.color})
+    if not keep:
+        in_color = (
+            sorted(
+                {c.size for c in family if c.size and color_matches(c.color, intent.color)},
+                key=_size_sort,
+            )
+            if intent.color
+            else []
+        )
+        in_size = (
+            sorted({c.color for c in family if c.color and _norm_size(c.size) == want_size})
+            if want_size
+            else []
+        )
+        hints = []
+        if intent.color and want_size:
+            head = f"{top.title} isn't available in {intent.color} in size {intent.size}."
+            if in_color:
+                hints.append(f"In {intent.color} it comes in sizes {', '.join(in_color)}")
+            if in_size:
+                hints.append(f"size {intent.size} comes in {', '.join(in_size)}")
+        elif intent.color:
+            head = f"{top.title} doesn't come in {intent.color}."
+            hints.append(f"Colours: {', '.join(colors)}")
+        else:
+            head = f"{top.title} isn't available in size {intent.size}."
+            hints.append(f"Sizes: {', '.join(sizes)}")
+        tail = "; ".join(hints)
+        return [], f"{head} {tail[:1].upper() + tail[1:]}. Which would you like?"
+    best = max(keep, key=lambda c: c.score)
+    fam = [c for c in keep if product_key(c) == product_key(best)]
+    fam_sizes = sorted({c.size for c in fam if c.size}, key=_size_sort)
+    fam_colors = sorted({c.color for c in fam if c.color})
+    if len(fam_colors) > 1 and not intent.color:
+        return [], f"{best.title} comes in {', '.join(fam_colors)}. Which colour?"
+    if len(fam_sizes) > 1 and not want_size:
+        return [], f"What size {best.title}? Available: {', '.join(fam_sizes)}."
+    return keep, None
+
+
+def _size_sort(s: str) -> tuple[int, float, str]:
+    try:
+        return (0, float(_norm_size(s)), s)
+    except ValueError:
+        order = {"xxs": 0, "xs": 1, "s": 2, "m": 3, "l": 4, "xl": 5, "xxl": 6, "xxxl": 7}
+        return (1, order.get(_norm_size(s), 99), s)
 
 
 class _PermitSeal:
@@ -141,6 +241,10 @@ class Orchestrator:
     @property
     def ship_to(self) -> Address | None:
         return self._ship_to
+
+    @property
+    def registry(self) -> AdapterRegistry:
+        return self._registry
 
     def vendor_ids(self) -> list[str]:
         return self._registry.vendor_ids()
@@ -237,14 +341,20 @@ class Orchestrator:
             )
             self._save_snapshot(txn_id, intent=intent.model_dump(mode="json"))
 
-        adapter = self._registry.get(intent.vendor)
-        if adapter is None:
-            if intent.vendor in self._engine.policy.vendors.deny:
-                facts = self._facts(intent, None, 0, ambiguous=False)
-                return self._decide(txn_id, intent, facts, None, [])
+        policy = self._engine.policy
+        if intent.vendor == ANY_ALLOWED_VENDOR:
+            stores = [v for v in self._registry.vendor_ids() if v not in policy.vendors.deny]
+        elif self._registry.get(intent.vendor) is not None:
+            stores = [intent.vendor]
+        elif intent.vendor in policy.vendors.deny:
+            facts = self._facts(intent, intent.vendor, None, 0, ambiguous=False)
+            return self._decide(txn_id, intent, facts, None, [])
+        else:
+            names = ", ".join(self._registry.display_names().values()) or "none"
             msg = (
-                f"unsupported_vendor: no integration for '{intent.vendor}'; "
-                f"supported: {', '.join(self._registry.vendor_ids())}"
+                f"unsupported_vendor: I'm not connected to a store called "
+                f"'{intent.vendor.replace('_', ' ')}'. Connected stores: {names}. "
+                "You can add stores on the Stores page."
             )
             self._set(
                 txn_id,
@@ -253,47 +363,119 @@ class Orchestrator:
                 {"reason_code": "unsupported_vendor", "explanation": msg},
             )
             return self._result(txn_id, TxnState.REJECTED, msg)
+        if not stores:
+            msg = "no_vendor_available: every connected store is blocked or disabled"
+            self._set(
+                txn_id,
+                TxnState.REJECTED,
+                "request_rejected",
+                {"reason_code": "no_vendor_available", "explanation": msg},
+            )
+            return self._result(txn_id, TxnState.REJECTED, msg)
 
-        try:
-            candidates = [
-                c
-                for c in adapter.search(intent.product_description)
-                if c.currency == intent.currency
-            ]
-        except VendorError as e:
-            self._set(txn_id, TxnState.FAILED, "vendor_unavailable", {"error": str(e)})
-            return self._result(txn_id, TxnState.FAILED, f"vendor search failed: {e}")
+        # ---- hard policy denials (restricted category, currency) apply before any search:
+        # a gift card is denied whether or not a store happens to stock one.
+        if intent.category in policy.categories.deny or intent.currency != policy.currency:
+            vendor = intent.vendor if intent.vendor != ANY_ALLOWED_VENDOR else stores[0]
+            facts = self._facts(intent, vendor, None, 0, ambiguous=False)
+            return self._decide(txn_id, intent, facts, None, [])
+
+        # ---- search every store in scope
+        candidates: list[Candidate] = []
+        errors: dict[str, str] = {}
+        for vid in stores:
+            adapter = self._registry.get(vid)
+            assert adapter is not None
+            try:
+                candidates += [
+                    c
+                    for c in adapter.search(intent.product_description, limit=60)
+                    if c.currency == intent.currency
+                ]
+            except VendorError as e:
+                errors[vid] = str(e)
         self._event(
             txn_id,
             "candidates_found",
-            {"candidates": [c.model_dump(mode="json") for c in candidates]},
+            {
+                "stores_searched": stores,
+                "store_errors": errors,
+                "candidates": [c.model_dump(mode="json") for c in candidates[:40]],
+            },
         )
+        if not candidates and errors and len(errors) == len(stores):
+            self._set(txn_id, TxnState.FAILED, "vendor_unavailable", {"errors": errors})
+            return self._result(
+                txn_id, TxnState.FAILED, f"store search failed: {'; '.join(errors.values())}"
+            )
 
-        ambiguous = len(candidates) > 1 and (
-            candidates[0].score - candidates[1].score < AMBIGUITY_MARGIN
+        # ---- sizes / colours
+        candidates, question = select_variants(intent, candidates)
+        if question:
+            self._set(
+                txn_id,
+                TxnState.NEEDS_CLARIFICATION,
+                "clarification_requested",
+                {"question": question, "reason": "variant"},
+            )
+            return self._result(txn_id, TxnState.NEEDS_CLARIFICATION, question)
+
+        if not candidates:
+            where = ", ".join(self._registry.display_names().get(v, v) for v in stores)
+            msg = (
+                f'I couldn\'t find "{intent.product_description}" at {where}. '
+                "Try different wording, or add a store that sells it on the Stores page."
+            )
+            self._set(
+                txn_id,
+                TxnState.NEEDS_CLARIFICATION,
+                "clarification_requested",
+                {"question": msg, "reasons": ["no_product_match"]},
+            )
+            return self._result(txn_id, TxnState.NEEDS_CLARIFICATION, msg)
+
+        # ---- rank: relevance, then stores you trust to buy autonomously, then price
+        candidates.sort(
+            key=lambda c: (-c.score, c.vendor not in policy.vendors.allow, c.unit_price_minor)
         )
+        best = candidates[0]
+        close = [c for c in candidates if best.score - c.score < AMBIGUITY_MARGIN]
+        distinct = {}
+        for c in close:
+            distinct.setdefault(product_key(c), c)
+        ambiguous = len(distinct) > 1
+        alternatives = [c for k, c in distinct.items() if k != product_key(best)]
+
+        adapter = self._registry.get(best.vendor)
+        assert adapter is not None
+        with self.store.atomic():
+            self.store.update_txn(txn_id, self._now(), vendor=best.vendor)
         item: ResolvedItem | None = None
-        if candidates and self._ship_to is not None:
+        if self._ship_to is not None:
             try:
-                item = adapter.resolve(candidates[0], intent.quantity, self._ship_to)
+                item = adapter.resolve(best, intent.quantity, self._ship_to)
             except VendorError as e:
                 self._event(txn_id, "resolution_failed", {"error": str(e)})
         if item is not None:
+            label = variant_label(best)
+            if label and label.lower() not in item.title.lower():
+                item = item.model_copy(update={"title": f"{item.title} ({label})"})
             self._event(txn_id, "item_resolved", {"item": item.model_dump(mode="json")})
 
-        facts = self._facts(intent, item, len(candidates), ambiguous=ambiguous)
-        alternatives = (
-            [c for c in candidates[1:] if candidates[0].score - c.score < AMBIGUITY_MARGIN]
-            if ambiguous
-            else []
-        )
+        facts = self._facts(intent, best.vendor, item, len(distinct), ambiguous=ambiguous)
         return self._decide(txn_id, intent, facts, item, alternatives)
 
     def _facts(
-        self, intent: PurchaseIntent, item: ResolvedItem | None, n: int, *, ambiguous: bool
+        self,
+        intent: PurchaseIntent,
+        vendor: str,
+        item: ResolvedItem | None,
+        n: int,
+        *,
+        ambiguous: bool,
     ) -> TransactionFacts:
         return TransactionFacts(
-            vendor=intent.vendor,
+            vendor=vendor,
             category=intent.category,
             quantity=item.quantity if item else intent.quantity,
             unit_price_minor=item.unit_price_minor if item else None,

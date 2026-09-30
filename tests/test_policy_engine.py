@@ -51,7 +51,7 @@ def test_in_policy_transaction_is_allowed(engine):
     d = engine.evaluate(facts(), ctx())
     assert d.outcome is Outcome.ALLOW
     assert d.reasons == ()
-    assert d.policy_version.startswith("2026-09-29.1#")
+    assert d.policy_version.startswith("2026-09-30.1#")
 
 
 def test_allow_at_exact_caps(engine):

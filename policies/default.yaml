@@ -2,7 +2,7 @@
 # Bump `version` on every change; the SHA-256 of this file is appended automatically and
 # recorded on every decision, so the audit log always shows exactly which rules applied.
 # All amounts are integer cents (minor units).
-version: "2026-09-29.1"
+version: "2026-09-30.1"
 currency: usd
 
 vendors:
@@ -18,6 +18,8 @@ categories:
     - household
     - books
     - personal_care
+    - footwear
+    - clothing
   deny:
     - subscriptions
     - gift_cards
@@ -33,6 +35,9 @@ caps:
     electronics_accessories: 3000      # $30.00
     office_supplies: 7500              # $75.00 (effective limit is min(this, per_transaction))
     books: 4000                        # $40.00
+    clothing: 5000                     # $50.00
+    footwear: 5000                     # $50.00 -> most sneakers will ask you first; raise
+                                       #   this AND per_transaction_minor to auto-buy them
   daily_minor: 15000                   # $150.00 rolling 24h
   weekly_minor: 40000                  # $400.00 rolling 7d
 

@@ -52,6 +52,11 @@ INTENT_TOOL: dict[str, Any] = {
                 "type": ["number", "null"],
                 "description": "only if the user stated a maximum price",
             },
+            "size": {
+                "type": ["string", "null"],
+                "description": "size exactly as the user said it (e.g. '8.5', 'M', '32x30')",
+            },
+            "color": {"type": ["string", "null"], "description": "colour the user asked for"},
             "constraints": {"type": "array", "items": {"type": "string"}},
             "clarifying_question": {"type": "string"},
             "missing_fields": {"type": "array", "items": {"type": "string"}},
@@ -63,8 +68,12 @@ INTENT_TOOL: dict[str, Any] = {
 SYSTEM_PROMPT = """You convert a shopping request into a structured purchase intent.
 Rules:
 - Only extract what the user said. Never invent a vendor, price limit, or quantity.
-- vendor: one of the supported vendor ids, or "any_allowed_vendor" if none was named.
-  If the user names a store not in the list, put its name lowercased with underscores.
+- vendor: the id of the store the user named, matched against the store list by id or
+  name; "any_allowed_vendor" if no store was named. If the user names a store that is not
+  in the list, put its name lowercased with underscores.
+- product_description: the product itself (brand + model + type), without the size,
+  colour, store or price.
+- size / color: only if the user gave them (e.g. "size 8.5", "in white").
 - category: the single best category id from the supported list. If none fits, use
   status "unsupported" and explain why in unsupported_reason.
 - quantity defaults to 1 only when the request clearly implies one item.
@@ -107,6 +116,67 @@ class AnthropicClient:
         raise ValueError("model did not return the intent tool call")
 
 
+class OpenRouterClient:
+    """OpenRouter chat-completions client (OpenAI-compatible) with a forced tool call.
+
+    Used for development/testing with an OpenRouter key; any tool-capable model works,
+    e.g. ``anthropic/claude-sonnet-5.5`` or the cheaper ``anthropic/claude-haiku-4.5``.
+    """
+
+    URL = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self, api_key: str, model: str, client: httpx.Client | None = None) -> None:
+        self._key = api_key
+        self._model = model
+        self._http = client or httpx.Client(timeout=httpx.Timeout(60.0, connect=5.0))
+
+    def extract(self, system: str, user: str, tool: dict[str, Any]) -> dict[str, Any]:
+        r = self._http.post(
+            self.URL,
+            headers={
+                "Authorization": f"Bearer {self._key}",
+                "X-Title": "Spenddat",
+                "HTTP-Referer": "http://127.0.0.1:8420",
+            },
+            json={
+                "model": self._model,
+                "max_tokens": 1024,
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool["description"],
+                            "parameters": tool["input_schema"],
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": tool["name"]}},
+            },
+        )
+        if r.status_code >= 400:
+            try:
+                msg = r.json().get("error", {}).get("message", "")
+            except ValueError:
+                msg = r.text[:200]
+            raise ValueError(f"OpenRouter HTTP {r.status_code}: {msg}")
+        data = r.json()
+        if data.get("error"):
+            raise ValueError(f"OpenRouter error: {data['error'].get('message', data['error'])}")
+        for choice in data.get("choices", []):
+            for call in (choice.get("message") or {}).get("tool_calls") or []:
+                fn = call.get("function") or {}
+                if fn.get("name") == tool["name"]:
+                    args = fn.get("arguments") or "{}"
+                    return dict(json.loads(args) if isinstance(args, str) else args)
+        raise ValueError("model did not return the intent tool call")
+
+
 _AMOUNT = re.compile(
     r"\$\s?(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s?(?:dollars|usd|bucks)\b", re.IGNORECASE
 )
@@ -128,11 +198,13 @@ class IntentParser:
         supported_vendors: Collection[str],
         autonomous_vendors: Collection[str],
         supported_categories: Collection[str],
+        vendor_names: dict[str, str] | None = None,
     ) -> None:
         self._llm = llm
         self._vendors = set(supported_vendors)
         self._auto_vendors = sorted(set(autonomous_vendors) & self._vendors)
         self._categories = set(supported_categories)
+        self._names = {v: (vendor_names or {}).get(v, v) for v in self._vendors}
 
     def parse(self, text: str) -> ParseResult:
         text = text.strip()
@@ -141,7 +213,7 @@ class IntentParser:
                 question="What would you like to buy?", missing_fields=("product_description",)
             )
         prompt = (
-            f"Supported vendor ids: {json.dumps(sorted(self._vendors))}\n"
+            f"Stores (id: name): {json.dumps(dict(sorted(self._names.items())))}\n"
             f"Supported category ids: {json.dumps(sorted(self._categories))}\n\n"
             f"<request>\n{text}\n</request>"
         )
@@ -192,6 +264,8 @@ class IntentParser:
                 category=str(raw.get("category") or ""),
                 quantity=raw.get("quantity") or 0,
                 max_price_minor=max_price_minor,
+                size=_clean(raw.get("size")),
+                color=_clean(raw.get("color")),
                 constraints=tuple(raw.get("constraints") or ()),
             )
         except ValidationError as e:
@@ -202,24 +276,34 @@ class IntentParser:
             )
 
         if intent.category not in self._categories:
+            nice = ", ".join(sorted(c.replace("_", " ") for c in self._categories))
             return UnsupportedRequest(
                 reason_code="unsupported_category",
-                explanation=f"category '{intent.category}' is not supported; supported: "
-                f"{', '.join(sorted(self._categories))}",
+                explanation=f"I don't have a category for "
+                f"'{intent.category.replace('_', ' ')}' in your policy. Categories I can buy: "
+                f"{nice}.",
             )
-        if intent.vendor == ANY_ALLOWED_VENDOR:
-            if len(self._auto_vendors) == 1:
-                return intent.model_copy(update={"vendor": self._auto_vendors[0]})
-            if not self._auto_vendors:
-                return UnsupportedRequest(
-                    reason_code="no_vendor_available",
-                    explanation="no vendors are enabled for purchasing",
-                )
-            return Clarification(
-                question=f"Which store should I buy from: {', '.join(self._auto_vendors)}?",
-                missing_fields=("vendor",),
+        if intent.vendor != ANY_ALLOWED_VENDOR and intent.vendor not in self._vendors:
+            by_name = {
+                re.sub(r"[^a-z0-9]+", "_", n.lower()).strip("_"): v for v, n in self._names.items()
+            }
+            if intent.vendor in by_name:
+                intent = intent.model_copy(update={"vendor": by_name[intent.vendor]})
+        # "any store": the orchestrator searches every enabled store and picks the best
+        # match, so there is nothing to ask here unless no store is enabled at all.
+        if intent.vendor == ANY_ALLOWED_VENDOR and not self._vendors:
+            return UnsupportedRequest(
+                reason_code="no_vendor_available",
+                explanation="no stores are connected; add one on the Stores page",
             )
         return intent
+
+
+def _clean(v: Any) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
 
 
 class ScriptedLlm:

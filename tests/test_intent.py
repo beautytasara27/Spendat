@@ -5,7 +5,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from spenddat.intent import AnthropicClient, IntentParser, ScriptedLlm, stated_amounts_minor
+from spenddat.intent import (
+    AnthropicClient,
+    IntentParser,
+    OpenRouterClient,
+    ScriptedLlm,
+    stated_amounts_minor,
+)
 from spenddat.models import Clarification, PurchaseIntent, UnsupportedRequest
 from tests.conftest import intent
 
@@ -26,16 +32,29 @@ def test_well_formed_request():
     assert r.vendor == "acp_merchant" and r.max_price_minor == 2500 and r.quantity == 1
 
 
-def test_unspecified_vendor_with_single_allowed_vendor_is_resolved():
-    r = parser(ScriptedLlm(intent(vendor="any_allowed_vendor"))).parse("buy a phone case")
-    assert isinstance(r, PurchaseIntent) and r.vendor == "acp_merchant"
+def test_unspecified_vendor_is_left_for_the_orchestrator_to_search_all_stores():
+    for auto in (("acp_merchant",), ("acp_merchant", "stub_vendor")):
+        r = parser(ScriptedLlm(intent(vendor="any_allowed_vendor")), auto=auto).parse(
+            "buy a phone case"
+        )
+        assert isinstance(r, PurchaseIntent) and r.vendor == "any_allowed_vendor"
 
 
-def test_unspecified_vendor_with_multiple_allowed_asks():
-    r = parser(
-        ScriptedLlm(intent(vendor="any_allowed_vendor")), auto=("acp_merchant", "stub_vendor")
-    ).parse("buy a phone case")
-    assert isinstance(r, Clarification) and r.missing_fields == ("vendor",)
+def test_store_named_by_display_name_is_mapped_to_its_id():
+    p = IntentParser(
+        ScriptedLlm(intent(vendor="sneaker_street")),
+        supported_vendors=("acp_merchant", "sneakers_01"),
+        autonomous_vendors=("acp_merchant",),
+        supported_categories=CATS,
+        vendor_names={"sneakers_01": "Sneaker Street"},
+    )
+    r = p.parse("buy a phone case from sneaker street")
+    assert isinstance(r, PurchaseIntent) and r.vendor == "sneakers_01"
+
+
+def test_size_and_color_are_extracted():
+    r = parser(ScriptedLlm(intent(size="8.5", color="white"))).parse("buy a case size 8.5 white")
+    assert r.size == "8.5" and r.color == "white"
 
 
 def test_vague_item_asks():
@@ -53,7 +72,7 @@ def test_vague_item_asks():
 def test_unsupported_category_rejected_with_explanation():
     r = parser(ScriptedLlm(intent(category="groceries"))).parse("buy milk")
     assert isinstance(r, UnsupportedRequest) and r.reason_code == "unsupported_category"
-    assert "supported" in r.explanation
+    assert "groceries" in r.explanation and "office supplies" in r.explanation
 
 
 def test_llm_unsupported_status_is_explained():
@@ -143,3 +162,63 @@ def test_anthropic_client_forces_tool_call():
     assert out["vendor"] == "acp_merchant"
     assert seen["tool_choice"] == {"type": "tool", "name": "record_purchase_intent"}
     assert seen["model"] == "claude-sonnet-5-5"
+
+
+def test_openrouter_client_forces_tool_call_and_parses_json_arguments():
+    import json
+
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(req.content))
+        seen["auth"] = req.headers["authorization"]
+        seen["url"] = str(req.url)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "record_purchase_intent",
+                                        "arguments": json.dumps(intent(size="8.5")),
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    from spenddat.intent import INTENT_TOOL
+
+    c = OpenRouterClient(
+        "sk-or-test",
+        "anthropic/claude-sonnet-5.5",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    out = c.extract("sys", "user", INTENT_TOOL)
+    assert out["size"] == "8.5"
+    assert seen["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert seen["auth"] == "Bearer sk-or-test"
+    assert seen["model"] == "anthropic/claude-sonnet-5.5"
+    assert seen["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "record_purchase_intent"},
+    }
+    assert seen["tools"][0]["function"]["parameters"]["properties"]["size"]
+    assert seen["messages"][0]["role"] == "system"
+
+
+def test_openrouter_errors_become_a_question_not_a_crash():
+    def handler(req):
+        return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+
+    c = OpenRouterClient("k", "m", httpx.Client(transport=httpx.MockTransport(handler)))
+    r = parser(c).parse("buy a phone case")
+    assert isinstance(r, Clarification) and "couldn't interpret" in r.question

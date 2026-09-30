@@ -13,6 +13,7 @@ import json
 import re
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -26,6 +27,7 @@ from spenddat.models import (
     TxnState,
 )
 from spenddat.orchestrator import Orchestrator
+from spenddat.stores import StoreConfig, StoreConfigError
 
 Block = dict[str, Any]
 
@@ -35,12 +37,110 @@ def _money(minor: int | None) -> str:
 
 
 class UiService:
-    def __init__(self, orch: Orchestrator, *, llm_label: str) -> None:
+    def __init__(
+        self,
+        orch: Orchestrator,
+        *,
+        llm_label: str,
+        config: StoreConfig | None = None,
+        rebuild: Callable[[], Orchestrator] | None = None,
+        demo: bool = False,
+    ) -> None:
         self.orch = orch
         self.llm_label = llm_label
+        self.config = config
+        self._rebuild = rebuild
+        self.demo = demo
         self._lock = threading.RLock()
         self._conversations: dict[str, dict[str, Any]] = {}
         self._approver = f"{getpass.getuser()} (ui)"
+
+    # ================================================================== stores
+
+    def stores(self, check: bool = False) -> dict[str, Any]:
+        with self._lock:
+            if self.config is None:
+                return {"editable": False, "stores": [], "catalogs": []}
+            rows = self.config.list()
+            for r in rows:
+                adapter = self.orch.registry.get(r["id"])
+                r["loaded"] = adapter is not None
+                r["secret_env"] = (
+                    self.config.secret_env_name(r["id"]) if r["type"] == "acp" else None
+                )
+                r["health"] = None
+                if check and adapter is not None:
+                    try:
+                        r["health"] = adapter.health_check()
+                    except Exception as e:
+                        r["health"] = {"ok": False, "error": str(e)[:200]}
+            from spenddat.sandbox.catalogs import CATALOGS
+
+            return {
+                "editable": True,
+                "mode": self.orch.mode.value,
+                "demo": self.demo,
+                "stores": rows,
+                "catalogs": sorted(CATALOGS) if self.demo else [],
+                "vendors_file": str(self.config.vendors_file),
+                "policy_file": str(self.config.policy_file),
+            }
+
+    def change_store(self, action: str, vid: str | None, body: dict[str, Any]) -> dict[str, Any]:
+        """Apply one store change, reload, and audit it. Rolls back if the reload fails."""
+        if self.config is None or self._rebuild is None:
+            raise StoreConfigError("store editing is not available in this mode")
+        with self._lock:
+            snap = self.config.snapshot()
+            before_version = self.orch.policy.full_version
+            before = self._store_row(vid) if vid else None
+            try:
+                if action == "add":
+                    vid = self.config.add(body)
+                elif action == "update":
+                    assert vid is not None
+                    if "enabled" in body:
+                        self.config.set_enabled(vid, bool(body["enabled"]))
+                    if "trust" in body:
+                        self.config.set_trust(vid, str(body["trust"]))
+                elif action == "remove":
+                    assert vid is not None
+                    self.config.remove(vid)
+                else:
+                    raise StoreConfigError(f"unknown action {action!r}")
+                new_orch = self._rebuild()
+            except Exception as e:
+                self.config.restore(snap)
+                if isinstance(e, StoreConfigError):
+                    raise
+                raise StoreConfigError(f"change not applied: {e}") from e
+            self.orch = new_orch
+            after = self._store_row(vid) if action != "remove" else None
+            self.orch.store.append(
+                "config",
+                "stores_changed",
+                self.orch.mode,
+                self.orch.now(),
+                {
+                    "action": action,
+                    "store": vid,
+                    "before": before,
+                    "after": after,
+                    "changed_by": self._approver,
+                    "policy_version_before": before_version,
+                    "policy_version_after": self.orch.policy.full_version,
+                },
+            )
+            return {"store": after, "policy_version": self.orch.policy.full_version}
+
+    def _store_row(self, vid: str | None) -> dict[str, Any] | None:
+        if not vid or self.config is None:
+            return None
+        try:
+            r = self.config.get(vid)
+        except StoreConfigError:
+            return None
+        return {k: r[k] for k in ("id", "name", "type", "enabled", "trust")}
 
     # ================================================================== dashboard data
 
@@ -142,6 +242,7 @@ class UiService:
                 "llm": self.llm_label,
                 "now": now.isoformat(),
                 "vendors": o.vendor_ids(),
+                "vendor_names": o.registry.display_names(),
                 "allowed_vendors": sorted(p.vendors.allow),
                 "ship_to": f"{ship.name}, {ship.city} {ship.state}" if ship else None,
                 "policy": {

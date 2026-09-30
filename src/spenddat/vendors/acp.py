@@ -36,8 +36,19 @@ _WORD = re.compile(r"[a-z0-9]+")
 _STOP = {"a", "an", "the", "for", "of", "and", "with", "to", "in", "my", "me", "some", "buy"}
 
 
+def _stem(w: str) -> str:
+    # light plural folding so "sambas"/"samba", "cases"/"case", "shoes"/"shoe" match
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
 def _tokens(text: str) -> set[str]:
-    return {w for w in _WORD.findall(text.lower()) if w not in _STOP and len(w) > 1}
+    return {_stem(w) for w in _WORD.findall(text.lower()) if w not in _STOP and len(w) > 1}
+
+
+def _opt(v: Any) -> str | None:
+    return str(v).strip() or None if v not in (None, "") else None
 
 
 def parse_feed_price(value: Any) -> tuple[int, str]:
@@ -179,6 +190,9 @@ class AcpAdapter(VendorAdapter):
                     in_stock=p.get("availability", "in_stock") == "in_stock",
                     url=p.get("link"),
                     score=round(score, 3),
+                    group_id=_opt(p.get("item_group_id")),
+                    size=_opt(p.get("size")),
+                    color=_opt(p.get("color")),
                 )
             )
         out = [c for c in out if c.in_stock]
@@ -265,6 +279,11 @@ class AcpAdapter(VendorAdapter):
             currency=str(session.get("currency", "usd")),
             permalink_url=order.get("permalink_url"),
         )
+
+    def health_check(self) -> dict[str, Any]:
+        self._feed = None  # force a fresh fetch
+        feed = self._load_feed()
+        return {"ok": True, "products": sum(1 for p in feed if p.get("enable_checkout", True))}
 
     def order_status(self, vendor_ref: str) -> tuple[OrderStatus, Receipt | None]:
         try:

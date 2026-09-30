@@ -221,29 +221,35 @@ def cmd_sandbox_merchant(args: argparse.Namespace) -> int:
 
 def cmd_ui(args: argparse.Namespace) -> int:
     import logging
+    import os
 
+    from spenddat.stores import StoreConfig
     from spenddat.ui.server import serve
-
-    logging.getLogger("spenddat").setLevel(logging.WARNING)
     from spenddat.ui.service import UiService
 
+    logging.getLogger("spenddat").setLevel(logging.WARNING)
+    settings = Settings.from_env()
     if args.demo:
         from spenddat.ui.demo import build_demo
 
-        db = args.db or "data/ui-demo.db"
-        if args.reset:
-            from pathlib import Path
-
-            for suffix in ("", "-wal", "-shm"):
-                p = Path(db + suffix)
-                if p.exists():
-                    p.rename(p.with_name(p.name + ".old"))
-        orch, label = build_demo(db, Settings.from_env().policy_file, seed=not args.no_seed)
+        app = build_demo(
+            args.data_dir, settings.policy_file, seed=not args.no_seed, reset=args.reset
+        )
+        service = UiService(
+            app.orch, llm_label=app.label, config=app.config, rebuild=app.rebuild, demo=True
+        )
     else:
+        from spenddat.llm import choose_llm
+
         orch = build_orchestrator()
-        label = f"Claude ({Settings.from_env().llm_model})"
+        service = UiService(
+            orch,
+            llm_label=choose_llm(dict(os.environ), build_secrets(orch.mode)).label,
+            config=StoreConfig(settings.vendors_file, settings.policy_file, orch.mode),
+            rebuild=build_orchestrator,
+        )
     serve(
-        UiService(orch, llm_label=label),
+        service,
         args.host,
         args.port,
         open_browser=not args.no_browser,
@@ -308,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     u.add_argument("--reset", action="store_true", help="(demo) start from a fresh database")
     u.add_argument("--no-seed", action="store_true", help="(demo) don't add sample history")
-    u.add_argument("--db", help="(demo) database path, default data/ui-demo.db")
+    u.add_argument("--data-dir", default="data/demo", help="(demo) where demo files live")
     u.add_argument("--host", default="127.0.0.1")
     u.add_argument("--port", type=int, default=8420)
     u.add_argument("--no-browser", action="store_true")
@@ -327,6 +333,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from spenddat.dotenv import load_dotenv
+
+    load_dotenv()
     configure_logging()
     args = build_parser().parse_args(argv)
     try:

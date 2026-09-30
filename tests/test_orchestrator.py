@@ -180,7 +180,7 @@ def test_unresolvable_escalation_goes_back_to_requester(h: Harness):
         "buy a garden gnome", product_description="garden gnome statue", category="household"
     )
     assert res.state is TxnState.NEEDS_CLARIFICATION
-    assert "no_product_match" in res.decision.reason_codes
+    assert "couldn't find" in res.message and "garden gnome" in res.message
     assert h.notifier.requests == []
 
 
