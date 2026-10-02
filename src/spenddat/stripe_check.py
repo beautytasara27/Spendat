@@ -172,13 +172,34 @@ def run_check(
             rep.add(None, "Shop key can't read account details (restricted key) - continuing")
         else:
             rep.add(False, "Shop Stripe key rejected", err or "")
-    if agent_acct and shop_acct:
-        same = agent_acct.get("id") == shop_acct.get("id")
+    # Separation of roles: the agent's account holds your card, the shop's account takes
+    # the money. They must be two different Stripe accounts.
+    if akey and skey and akey == skey:
+        rep.add(
+            False,
+            "Agent and shop are using the same key",
+            "the shop needs its own Stripe account - put that account's key in "
+            "SPENDDAT_SHOP_STRIPE_SECRET_KEY",
+        )
+    elif agent_acct and shop_acct:
+        if agent_acct.get("id") == shop_acct.get("id"):
+            rep.add(
+                False,
+                f"Agent and shop are the same Stripe account ({agent_acct.get('id')})",
+                "create a separate account for the shop (Dashboard account menu > "
+                "New account) and use its key for SPENDDAT_SHOP_STRIPE_SECRET_KEY",
+            )
+        else:
+            rep.add(
+                True,
+                f"Agent ({agent_acct.get('id')}) and shop ({shop_acct.get('id')}) "
+                "are separate Stripe accounts",
+            )
+    elif akey and skey:
         rep.add(
             None,
-            "Agent and shop use the same Stripe account"
-            if same
-            else "Agent and shop use different Stripe accounts",
+            "Couldn't confirm the agent and shop are different accounts "
+            "(restricted keys can't read account details) - make sure they are",
         )
 
     profiles = check_profiles(vendors_file)

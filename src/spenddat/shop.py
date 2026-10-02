@@ -8,8 +8,9 @@ Test keys move test money; live keys move real money (to your own Stripe balance
 
 Secrets (in ``.env`` or your secrets manager, never in files in the repo):
 
-* ``SPENDDAT_SHOP_STRIPE_SECRET_KEY`` - the shop's Stripe secret key (``sk_test_``/``sk_live_``,
-  or a restricted ``rk_`` key). Its prefix decides whether the shop is in test or live mode.
+* ``SPENDDAT_SHOP_STRIPE_SECRET_KEY`` - the secret key of the **shop's own Stripe account**
+  (``sk_test_``/``sk_live_``, or a restricted ``rk_`` key), separate from the agent's
+  account that holds your card. Its prefix decides whether the shop is in test or live mode.
 * ``SPENDDAT_SHOP_AGENT_KEY`` - the key an agent must present to use the shop's checkout.
   Spenddat reads the same value as ``SPENDDAT_<MODE>_MY_SHOP_API_KEY``.
 
@@ -103,6 +104,12 @@ def load_shop(path: str | Path, env: dict[str, str] | None = None) -> ShopSettin
     key = e.get("SPENDDAT_SHOP_STRIPE_SECRET_KEY", "").strip()
     if not key.startswith(("sk_test_", "sk_live_", "rk_test_", "rk_live_")):
         raise ShopError("set SPENDDAT_SHOP_STRIPE_SECRET_KEY to the shop's Stripe secret key")
+    for agent_var in ("SPENDDAT_SANDBOX_STRIPE_SECRET_KEY", "SPENDDAT_LIVE_STRIPE_SECRET_KEY"):
+        if e.get(agent_var, "").strip() == key:
+            raise ShopError(
+                f"SPENDDAT_SHOP_STRIPE_SECRET_KEY is the agent's key ({agent_var}). The shop "
+                "must use its own Stripe account's key."
+            )
     agent_key = e.get("SPENDDAT_SHOP_AGENT_KEY", "").strip()
     if len(agent_key) < 20:
         raise ShopError("SPENDDAT_SHOP_AGENT_KEY is missing - run `spenddat shop init`")
@@ -232,9 +239,7 @@ def init_shop(
             for k, v in missing.items():
                 f.write(f"{k}={v}\n")
             if "SPENDDAT_SHOP_STRIPE_SECRET_KEY" not in have:
-                f.write(
-                    "# SPENDDAT_SHOP_STRIPE_SECRET_KEY=sk_test_...   # the SHOP account's key\n"
-                )
+                f.write("# SPENDDAT_SHOP_STRIPE_SECRET_KEY=sk_test_...  # SHOP account's own key\n")
         done.append(f"added the shop's agent key to {env_file}")
 
     # store entry (both modes) via the comment-preserving editor

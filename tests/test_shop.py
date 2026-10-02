@@ -433,3 +433,44 @@ def test_stripe_check_lists_saved_cards_when_pm_missing(project):
         client=httpx.Client(transport=httpx.MockTransport(FakeStripe().handler)),
     )
     assert "pm_found1  visa ending 1111  (Me)" in rep.render()
+
+
+def _check(root, env):
+    return run_check(
+        RuntimeMode.LIVE,
+        EnvSecrets(RuntimeMode.LIVE, env),
+        env,
+        root / "config/vendors.yaml",
+        client=httpx.Client(transport=httpx.MockTransport(FakeStripe().handler)),
+    )
+
+
+def test_stripe_check_confirms_two_separate_accounts(project):
+    root, _ = project
+    rep = _check(root, live_env(root))
+    assert "Agent (acct_agent) and shop (acct_shop) are separate Stripe accounts" in rep.render()
+
+
+def test_stripe_check_fails_when_shop_uses_agent_key(project):
+    root, _ = project
+    env = live_env(root)
+    env["SPENDDAT_SHOP_STRIPE_SECRET_KEY"] = env["SPENDDAT_LIVE_STRIPE_SECRET_KEY"]
+    rep = _check(root, env)
+    assert not rep.ok and "same key" in rep.render()
+
+
+def test_stripe_check_fails_when_both_keys_are_one_account(project):
+    root, _ = project
+    env = live_env(root)
+    env["SPENDDAT_SHOP_STRIPE_SECRET_KEY"] = "sk_live_agent_second_key"  # same account
+    rep = _check(root, env)
+    assert not rep.ok and "same Stripe account (acct_agent)" in rep.render()
+    assert "Issued a 50-cent" not in rep.render()  # no token issued when setup is wrong
+
+
+def test_shop_refuses_to_run_with_the_agent_key(project):
+    root, _ = project
+    env = live_env(root)
+    env["SPENDDAT_SHOP_STRIPE_SECRET_KEY"] = env["SPENDDAT_LIVE_STRIPE_SECRET_KEY"]
+    with pytest.raises(ShopError, match="agent's key"):
+        load_shop(root / "config/shop.yaml", env)

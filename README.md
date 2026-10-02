@@ -227,8 +227,9 @@ existing transaction and never buys twice.
 ## Make a real purchase (your own shop)
 
 No public shop lets an independent agent buy yet, so Spenddat can run one for you: a
-small agent-checkout shop on your computer, charging your card through your own Stripe
-account (money goes to your own balance and `spenddat shop refund --all` returns it).
+small agent-checkout shop on your computer. It uses two Stripe accounts with separate jobs:
+the **agent** account holds your card and issues one-time payment tokens; the **shop**
+account takes the payment (and `spenddat shop refund --all` returns it).
 Step-by-step: [`docs/my-shop-guide.md`](docs/my-shop-guide.md).
 
 ```bash
