@@ -16,8 +16,10 @@ import json
 import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -107,6 +109,10 @@ def _price_str(minor: int) -> str:
     return f"{minor // 100}.{minor % 100:02d} USD"
 
 
+class ChargeDeclined(RuntimeError):
+    """The payment provider refused the charge; nothing was taken."""
+
+
 @dataclass
 class _Session:
     id: str
@@ -125,16 +131,55 @@ class ReferenceMerchant:
         catalog: list[dict[str, Any]] | None = None,
         tax_bp: int = 0,
         charger: Callable[[str, int, str], str] | None = None,
+        fulfillment: list[dict[str, Any]] | None = None,
+        state_file: str | Path | None = None,
+        link_base: str = "https://merchant.example",
     ) -> None:
         self.api_key = api_key
         self.catalog = {p["id"]: dict(p) for p in (catalog or DEFAULT_CATALOG)}
         self.tax_bp = tax_bp
         self.charger = charger
+        self.fulfillment = [
+            {"type": "shipping", "tax": 0, "subtotal": f["total"], **f}
+            for f in (fulfillment or FULFILLMENT)
+        ]
+        self.link_base = link_base.rstrip("/")
         self.sessions: dict[str, _Session] = {}
         self.orders_created = 0
         self.lock = threading.Lock()
+        self.state_file = Path(state_file) if state_file else None
+        self._load()
         # fault injection (tests)
         self.drop_next_complete_response = False
+
+    # ------------------------------------------------------------------ persistence
+
+    def _load(self) -> None:
+        if not self.state_file or not self.state_file.exists():
+            return
+        data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        for d in data.get("sessions", []):
+            self.sessions[d["id"]] = _Session(**d)
+        self.orders_created = sum(1 for x in self.sessions.values() if x.order)
+
+    def _save(self) -> None:
+        if not self.state_file:
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_file.with_name(self.state_file.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"sessions": [asdict(x) for x in self.sessions.values()]}, indent=1),
+            encoding="utf-8",
+        )
+        tmp.replace(self.state_file)
+
+    def orders(self) -> list[dict[str, Any]]:
+        out = []
+        for x in self.sessions.values():
+            if x.order:
+                r = self._render(x)
+                out.append({**x.order, "total": r["totals"][-1]["amount"], "items": x.items})
+        return sorted(out, key=lambda o: o.get("created_at", ""))
 
     # ------------------------------------------------------------------ helpers
 
@@ -148,7 +193,7 @@ class ReferenceMerchant:
                 "availability": p.get("availability", "in_stock"),
                 "product_category": p["product_category"],
                 "enable_checkout": True,
-                "link": f"https://merchant.example/p/{p['id']}",
+                "link": f"{self.link_base}/p/{p['id']}",
                 **{k: p[k] for k in ("item_group_id", "size", "color") if p.get(k)},
             }
             for p in self.catalog.values()
@@ -173,7 +218,7 @@ class ReferenceMerchant:
                 }
             )
         tax_total = sum(li["tax"] for li in lines)
-        ship = next((f["total"] for f in FULFILLMENT if f["id"] == s.fulfillment_option_id), 0)
+        ship = next((f["total"] for f in self.fulfillment if f["id"] == s.fulfillment_option_id), 0)
         out: dict[str, Any] = {
             "id": s.id,
             "status": s.status,
@@ -181,7 +226,7 @@ class ReferenceMerchant:
             "payment_provider": {"provider": "stripe", "supported_payment_methods": ["card"]},
             "line_items": lines,
             "fulfillment_address": s.address,
-            "fulfillment_options": FULFILLMENT if s.address else [],
+            "fulfillment_options": self.fulfillment if s.address else [],
             "fulfillment_option_id": s.fulfillment_option_id,
             "totals": [
                 {"type": "items_base_amount", "display_text": "Items", "amount": base},
@@ -231,9 +276,10 @@ class ReferenceMerchant:
                 if s.status in ("completed", "canceled"):
                     return 409, {"type": "invalid_request", "code": "state", "message": s.status}
                 fid = (body or {}).get("fulfillment_option_id")
-                if fid and any(f["id"] == fid for f in FULFILLMENT):
+                if fid and any(f["id"] == fid for f in self.fulfillment):
                     s.fulfillment_option_id = fid
                 self._ready(s)
+                self._save()
                 return 200, self._render(s)
             if method == "POST" and parts[2:] == ["complete"]:
                 return self._complete(s, headers, body or {})
@@ -241,6 +287,7 @@ class ReferenceMerchant:
                 if s.status == "completed":
                     return 405, {"type": "invalid_request", "code": "state", "message": "done"}
                 s.status = "canceled"
+                self._save()
                 return 200, self._render(s)
         return 404, {"type": "invalid_request", "code": "not_found", "message": path}
 
@@ -262,8 +309,11 @@ class ReferenceMerchant:
             items=[{"id": i["id"], "quantity": int(i["quantity"])} for i in items],
             address=body.get("fulfillment_address"),
         )
+        if len(self.fulfillment) == 1 and s.address:
+            s.fulfillment_option_id = self.fulfillment[0]["id"]
         self._ready(s)
         self.sessions[s.id] = s
+        self._save()
         return 201, self._render(s)
 
     def _complete(
@@ -283,18 +333,28 @@ class ReferenceMerchant:
                 "message": "a Stripe shared payment token is required",
             }
         total = self._render(s)["totals"][-1]["amount"]
-        charge_id = self.charger(token, total, s.id) if self.charger else f"pi_sim_{s.id}"
+        try:
+            charge_id = self.charger(token, total, s.id) if self.charger else f"pi_sim_{s.id}"
+        except ChargeDeclined as e:
+            # Nothing was taken; the session stays payable so a new token can be tried.
+            return 402, {
+                "type": "invalid_request",
+                "code": "payment_declined",
+                "message": str(e),
+            }
         s.status = "completed"
         s.order = {
             "id": f"ord_{uuid.uuid4().hex[:12]}",
             "checkout_session_id": s.id,
-            "permalink_url": f"https://merchant.example/orders/{s.id}",
+            "permalink_url": f"{self.link_base}/orders/{s.id}",
             "payment_reference": charge_id,
+            "created_at": datetime.now(UTC).isoformat(),
         }
         self.orders_created += 1
         resp = self._render(s)
         if idem:
             s.completions[idem] = resp
+        self._save()
         return 200, resp
 
     # ------------------------------------------------------------------ transports
@@ -317,28 +377,65 @@ class ReferenceMerchant:
         return httpx.MockTransport(_h)
 
 
-def stripe_test_charger(secret_key: str) -> Callable[[str, int, str], str]:
-    """Charge a granted SPT with a Stripe *test-mode* PaymentIntent (seller side)."""
-    if not secret_key.startswith(("sk_test_", "rk_test_")):
-        raise ValueError("reference merchant only accepts Stripe test keys")
+STRIPE_PREVIEW_VERSION = "2026-04-22.preview"
+
+
+def stripe_charger(
+    secret_key: str, client: httpx.Client | None = None, *, allow_live: bool = False
+) -> Callable[[str, int, str], str]:
+    """Seller side: charge a granted shared payment token with a PaymentIntent.
+
+    Test keys always work; live keys only with ``allow_live=True`` (used by ``spenddat
+    shop``). Declines and payments that need extra customer action (3-D Secure) raise
+    ``ChargeDeclined`` - nothing is taken in either case.
+    """
+    live = secret_key.startswith(("sk_live_", "rk_live_"))
+    if not (live or secret_key.startswith(("sk_test_", "rk_test_"))):
+        raise ValueError("not a Stripe secret key")
+    if live and not allow_live:
+        raise ValueError("live Stripe keys are only accepted by `spenddat shop`")
+    http = client or httpx.Client(timeout=30)
 
     def charge(token: str, amount: int, ref: str) -> str:
-        r = httpx.post(
+        r = http.post(
             "https://api.stripe.com/v1/payment_intents",
             auth=(secret_key, ""),
-            headers={"Stripe-Version": "2026-04-22.preview", "Idempotency-Key": f"pi_{ref}"},
+            headers={"Stripe-Version": STRIPE_PREVIEW_VERSION, "Idempotency-Key": f"pi_{ref}"},
             data={
                 "amount": str(amount),
                 "currency": "usd",
                 "confirm": "true",
                 "payment_method_data[shared_payment_granted_token]": token,
+                "metadata[checkout_session]": ref,
             },
-            timeout=30,
         )
-        r.raise_for_status()
-        return str(r.json()["id"])
+        body = r.json() if r.content else {}
+        if r.status_code >= 400:
+            err = body.get("error", {})
+            msg = err.get("message") or f"HTTP {r.status_code}"
+            if err.get("type") in ("card_error",) or r.status_code == 402:
+                raise ChargeDeclined(f"card declined: {msg}")
+            raise ChargeDeclined(f"payment failed: {msg}")
+        status = body.get("status")
+        if status in ("succeeded", "processing"):
+            return str(body["id"])
+        if status == "requires_action":
+            http.post(
+                f"https://api.stripe.com/v1/payment_intents/{body['id']}/cancel",
+                auth=(secret_key, ""),
+            )
+            raise ChargeDeclined(
+                "the card issuer asked for extra verification (3-D Secure), which an "
+                "agent purchase can't complete yet; nothing was charged"
+            )
+        raise ChargeDeclined(f"payment not completed (status {status})")
 
     return charge
+
+
+def stripe_test_charger(secret_key: str) -> Callable[[str, int, str], str]:
+    """Backwards-compatible: test-mode only."""
+    return stripe_charger(secret_key)
 
 
 def serve(merchant: ReferenceMerchant, host: str = "127.0.0.1", port: int = 8787) -> None:

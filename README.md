@@ -224,6 +224,21 @@ spenddat sandbox-merchant --port 8787         # local ACP merchant for sandbox r
 `buy --request-id <id>` makes a submission idempotent: retrying with the same id returns the
 existing transaction and never buys twice.
 
+## Make a real purchase (your own shop)
+
+No public shop lets an independent agent buy yet, so Spenddat can run one for you: a
+small agent-checkout shop on your computer, charging your card through your own Stripe
+account (money goes to your own balance and `spenddat shop refund --all` returns it).
+Step-by-step: [`docs/my-shop-guide.md`](docs/my-shop-guide.md).
+
+```bash
+spenddat shop init            # shop config, agent key, store entry, policy category
+spenddat stripe-check         # verify keys/card/profile; no money moves
+spenddat shop run             # open the shop (window 1)
+spenddat ui                   # shop with the agent (window 2)
+spenddat shop refund --all    # get the money back
+```
+
 ## Live-mode demonstration
 
 The runbook for the two required live purchases (autonomous ALLOW and human-approved
@@ -253,6 +268,6 @@ src/spenddat/
   sandbox/             reference ACP merchant (sandbox only)
   ui/                  local web app: JSON API, chat service, static dashboard + chat
   cli.py
-tests/                 167 tests (+1 opt-in Stripe test-mode test); tests/contract = adapter contract suite
+tests/                 204 tests (+1 opt-in Stripe test-mode test); tests/contract = adapter contract suite
 docs/                  architecture, ADRs, runbooks
 ```

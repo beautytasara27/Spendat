@@ -258,6 +258,77 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+SHOP_FILE = "config/shop.yaml"
+SHOP_STATE = "data/shop"
+
+
+def cmd_shop(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from spenddat.shop import ShopError, init_shop, load_shop, refund_orders, run_shop
+
+    settings = Settings.from_env()
+    try:
+        if args.shop_cmd == "init":
+            for line in init_shop(
+                shop_file=Path(SHOP_FILE),
+                env_file=Path(".env"),
+                vendors_file=Path(settings.vendors_file),
+                policy_file=Path(settings.policy_file),
+                test_profile=args.test_profile,
+                live_profile=args.live_profile,
+            ):
+                print(f"  - {line}")
+            print(
+                "done. Next: put the shop's Stripe key in .env as "
+                "SPENDDAT_SHOP_STRIPE_SECRET_KEY, then run `spenddat stripe-check`."
+            )
+            return 0
+        shop = load_shop(SHOP_FILE)
+        if args.shop_cmd == "run":
+            run_shop(shop, SHOP_STATE)
+            return 0
+        if args.shop_cmd == "orders":
+            from spenddat.shop import build_merchant
+
+            orders = build_merchant(shop, SHOP_STATE).orders()
+            print(f"{shop.name} [{'LIVE' if shop.live else 'TEST'}] - {len(orders)} order(s)")
+            for o in orders:
+                items = ", ".join(f"{i['quantity']} x {i['id']}" for i in o["items"])
+                print(
+                    f"  {o['id']}  ${o['total'] / 100:.2f}  {o.get('created_at', '')[:19]}  "
+                    f"{items}  {o.get('payment_reference')}"
+                )
+            return 0
+        if args.shop_cmd == "refund":
+            if not args.order_id and not args.all:
+                print("give an order id or --all", file=sys.stderr)
+                return 2
+            for oid, result in refund_orders(shop, SHOP_STATE, None if args.all else args.order_id):
+                print(f"  {oid}: {result}")
+            return 0
+    except ShopError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 78
+    return 2
+
+
+def cmd_stripe_check(args: argparse.Namespace) -> int:
+    import os
+    from pathlib import Path
+
+    from spenddat.stripe_check import run_check
+
+    settings = Settings.from_env()
+    rep = run_check(
+        settings.mode, build_secrets(settings.mode), dict(os.environ), Path(settings.vendors_file)
+    )
+    print(rep.render())
+    print("")
+    print("All good." if rep.ok else "Fix the FAIL items above and run this again.")
+    return 0 if rep.ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="spenddat", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -324,6 +395,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow binding a non-loopback address (not recommended)",
     )
     u.set_defaults(func=cmd_ui)
+
+    sh = sub.add_parser("shop", help="your own agent-checkout shop on your Stripe account")
+    shs = sh.add_subparsers(dest="shop_cmd", required=True)
+    si = shs.add_parser("init", help="create the shop config, agent key and store entry")
+    si.add_argument("--test-profile", help="the shop account's Stripe profile id (test mode)")
+    si.add_argument("--live-profile", help="the shop account's Stripe profile id (live mode)")
+    shs.add_parser("run", help="open the shop on 127.0.0.1")
+    shs.add_parser("orders", help="list the shop's orders")
+    sr = shs.add_parser("refund", help="refund an order (or --all)")
+    sr.add_argument("order_id", nargs="?")
+    sr.add_argument("--all", action="store_true")
+    sh.set_defaults(func=cmd_shop)
+
+    sub.add_parser(
+        "stripe-check", help="verify Stripe keys, card and shop profile (no money moves)"
+    ).set_defaults(func=cmd_stripe_check)
 
     m = sub.add_parser("sandbox-merchant", help="run the reference ACP merchant locally")
     m.add_argument("--host", default="127.0.0.1")

@@ -32,6 +32,16 @@ from spenddat.vendors.base import AdapterRegistry
 LIVE_CONFIRM_VALUE = "I_ACCEPT_REAL_PURCHASES"
 
 
+def is_secure_url(url: str) -> bool:
+    """https anywhere, or http to this machine only (traffic never leaves it)."""
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    if u.scheme == "https":
+        return bool(u.hostname)
+    return u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
+
+
 class StartupError(RuntimeError):
     pass
 
@@ -128,8 +138,11 @@ def startup_checks(settings: Settings, secrets: SecretsProvider, env: dict[str, 
                 continue
             if live:
                 for url_key in ("base_url", "feed_url"):
-                    if not str(section.get(url_key, "")).startswith("https://"):
-                        problems.append(f"vendor {v['id']}: live {url_key} must be https")
+                    if not is_secure_url(str(section.get(url_key, ""))):
+                        problems.append(
+                            f"vendor {v['id']}: live {url_key} must be https "
+                            "(plain http is only allowed for 127.0.0.1/localhost)"
+                        )
                 if "test" in str(section.get("seller_profile", "")):
                     problems.append(f"vendor {v['id']}: live seller_profile looks like a test id")
             placeholders = [k for k, val in section.items() if "REPLACE" in str(val)]

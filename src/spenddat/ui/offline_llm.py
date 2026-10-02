@@ -19,6 +19,7 @@ _CATEGORY_WORDS: dict[str, tuple[str, ...]] = {
     "alcohol": ("wine", "beer", "vodka", "whiskey"),
     "tobacco": ("cigarette", "cigar", "vape"),
     "weapons": ("knife", "gun", "ammo"),
+    "digital_goods": ("thank-you note", "thank you note", "supporter pass", "digital"),
     "footwear": (
         "shoe",
         "sneaker",

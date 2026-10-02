@@ -1,5 +1,8 @@
 # Live-mode demonstration runbook
 
+> **Easiest path today:** run your own shop and buy from it — see
+> [`my-shop-guide.md`](my-shop-guide.md). This runbook covers using a third-party merchant.
+
 This performs **real purchases with real money**. Run it deliberately, by hand. The test suite
 and CI can never do this: they have no live credentials and the fake provider refuses live mode.
 

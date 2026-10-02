@@ -193,8 +193,13 @@ class StoreConfig:
                 url = str(spec.get(key) or "").strip()
                 if not re.match(r"^https?://[^\s]+$", url):
                     raise StoreConfigError(f"{key.replace('_', ' ')} must be a URL")
-                if self.mode is RuntimeMode.LIVE and not url.startswith("https://"):
-                    raise StoreConfigError(f"{key.replace('_', ' ')} must use https in live mode")
+                from spenddat.config import is_secure_url
+
+                if self.mode is RuntimeMode.LIVE and not is_secure_url(url):
+                    raise StoreConfigError(
+                        f"{key.replace('_', ' ')} must use https in live mode "
+                        "(http only for 127.0.0.1)"
+                    )
                 section[key] = url
             profile = str(spec.get("seller_profile") or "").strip()
             if not re.match(r"^profile_[A-Za-z0-9_]+$", profile):

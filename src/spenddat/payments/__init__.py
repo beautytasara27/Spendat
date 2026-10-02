@@ -147,6 +147,14 @@ class StripeSharedPaymentTokens:
         if cred.max_amount_minor > amount_minor:
             self.revoke(cred.token)
             raise PaymentError("issued token cap exceeds the approved amount")
+        if body.get("status") not in (None, "active"):
+            self.revoke(cred.token)
+            if body.get("status") == "requires_action":
+                raise PaymentError(
+                    "your card issuer wants extra verification (3-D Secure) before this card "
+                    "can be used by an agent; nothing was charged"
+                )
+            raise PaymentError(f"payment token not usable (status {body.get('status')})")
         log(
             _log,
             20,
