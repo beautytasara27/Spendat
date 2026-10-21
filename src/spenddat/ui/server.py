@@ -92,7 +92,10 @@ def make_handler(service: UiService, allowed_hosts: set[str]) -> type[BaseHTTPRe
                 if path == "/api/approvals":
                     return self._json(200, service.approvals())
                 if path == "/api/stores":
-                    check = q.get("check", ["0"])[0] == "1"
+                    raw = q.get("check", ["0"])[0]
+                    check: bool | str = (
+                        True if raw == "1" else (raw if raw not in ("", "0") else False)
+                    )
                     return self._json(200, service.stores(check=check))
                 return self._static(path)
             except Exception as e:

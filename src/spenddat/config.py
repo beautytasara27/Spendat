@@ -136,8 +136,11 @@ def startup_checks(settings: Settings, secrets: SecretsProvider, env: dict[str, 
             if not section:
                 problems.append(f"vendor {v.get('id')} has no '{settings.mode.value}' section")
                 continue
+            url_keys = (
+                ("store_url",) if v.get("type") == "shopify_web" else ("base_url", "feed_url")
+            )
             if live:
-                for url_key in ("base_url", "feed_url"):
+                for url_key in url_keys:
                     if not is_secure_url(str(section.get(url_key, ""))):
                         problems.append(
                             f"vendor {v['id']}: live {url_key} must be https "

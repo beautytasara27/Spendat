@@ -60,7 +60,7 @@ def intent(**kw: Any) -> dict[str, Any]:
 
 class Clock:
     def __init__(self) -> None:
-        self.t = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+        self.t = datetime.now(UTC).replace(microsecond=0)
 
     def __call__(self) -> datetime:
         return self.t

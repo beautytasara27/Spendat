@@ -71,7 +71,26 @@ def _build_reference(
     )
 
 
+def _build_shopify_web(
+    vid: str, cfg: dict[str, Any], _s: SecretsProvider, buyer: dict[str, str] | None
+) -> VendorAdapter:
+    """A Shopify store reached through Shopify's in-browser agent tools (WebMCP)."""
+    from spenddat.browser import shared_session
+    from spenddat.vendors.shopify_web import ShopifyWebAdapter
+
+    sandbox = cfg.get("__mode") == RuntimeMode.SANDBOX.value
+    return ShopifyWebAdapter(
+        vendor_id=vid,
+        store_url=cfg["store_url"],
+        session=shared_session(),
+        buyer=buyer,
+        # sandbox never places real orders, unless this is a Shopify development store
+        dry_run=sandbox and not cfg.get("test_store", False),
+    )
+
+
 ADAPTER_BUILDERS: dict[str, Builder] = {
+    "shopify_web": _build_shopify_web,
     "acp": _build_acp,
     "stub": _build_stub,
     "reference": _build_reference,
@@ -87,7 +106,9 @@ def build_adapter(
         raise ValueError(f"unknown vendor type {vtype!r}")
     if vtype in SANDBOX_ONLY_TYPES and mode is RuntimeMode.LIVE:
         raise ValueError(f"{vtype} vendors cannot be used in live mode")
-    adapter = ADAPTER_BUILDERS[vtype](spec["id"], spec[mode.value], secrets, buyer)
+    section = dict(spec[mode.value] or {})
+    section["__mode"] = mode.value
+    adapter = ADAPTER_BUILDERS[vtype](spec["id"], section, secrets, buyer)
     adapter.display_name = spec.get("name") or None
     return adapter
 

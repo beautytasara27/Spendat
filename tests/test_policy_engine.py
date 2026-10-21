@@ -266,7 +266,7 @@ def test_custom_rule_extends_engine_without_changes(engine):
     e = PolicyEngine(engine.policy, extra_rules=[no_weekend])
     sat = SpendContext(now=datetime(2026, 10, 3, tzinfo=UTC))
     assert e.evaluate(facts(), sat).reason_codes == ("weekend",)
-    assert len(DEFAULT_RULES) == 11
+    assert len(DEFAULT_RULES) == 12
 
 
 def test_engine_has_no_mode_input():

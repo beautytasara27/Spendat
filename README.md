@@ -240,6 +240,19 @@ spenddat ui                   # shop with the agent (window 2)
 spenddat shop refund --all    # get the money back
 ```
 
+## Shop on Shopify stores (browser agent)
+
+Shopify stores with agent checkout can be shopped through Chrome: Spenddat calls the
+store's WebMCP tools and pays with your Shop Pay saved card, after your approval. In
+sandbox mode it stops before placing the order. Guide: [`docs/shopify-guide.md`](docs/shopify-guide.md).
+
+```bash
+pip install -e ".[browser]"
+spenddat browser login                              # sign in to Shop Pay once
+spenddat browser inspect https://store.example --query "samba"   # see a store's tools
+spenddat browser keys                               # optional Web Bot Auth key
+```
+
 ## Live-mode demonstration
 
 The runbook for the two required live purchases (autonomous ALLOW and human-approved
@@ -262,13 +275,15 @@ src/spenddat/
   approval/            escalation lifecycle, notifiers, timeouts
   orchestrator.py      pipeline, single execution gate, reconciliation
   payments/            Stripe Shared Payment Tokens (+ sandbox-only fake)
-  vendors/             adapter interface, ACP adapter, stub adapter, factory
+  vendors/             adapter interface, ACP, Shopify (WebMCP), stub, factory
   audit.py             hash-chained append-only log + projections
   secrets.py           mode-namespaced secrets (env / secrets-manager CLI)
   observability.py     JSON logs, correlation ids, redaction
   sandbox/             reference ACP merchant (sandbox only)
+  browser/             Chrome session, WebMCP tool calls, Web Bot Auth signing
+  shop.py              your own Stripe agent-checkout shop
   ui/                  local web app: JSON API, chat service, static dashboard + chat
   cli.py
-tests/                 204 tests (+1 opt-in Stripe test-mode test); tests/contract = adapter contract suite
+tests/                 229 tests (+1 opt-in Stripe test-mode test); tests/contract = adapter contract suite
 docs/                  architecture, ADRs, runbooks
 ```

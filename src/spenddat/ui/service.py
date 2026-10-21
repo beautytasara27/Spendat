@@ -57,7 +57,9 @@ class UiService:
 
     # ================================================================== stores
 
-    def stores(self, check: bool = False) -> dict[str, Any]:
+    def stores(self, check: bool | str = False) -> dict[str, Any]:
+        """``check=True`` probes API stores; ``check="<id>"`` probes just that store
+        (browser stores are only probed on request: it opens Chrome)."""
         with self._lock:
             if self.config is None:
                 return {"editable": False, "stores": [], "catalogs": []}
@@ -69,7 +71,11 @@ class UiService:
                     self.config.secret_env_name(r["id"]) if r["type"] == "acp" else None
                 )
                 r["health"] = None
-                if check and adapter is not None:
+                r["integration"] = getattr(adapter, "integration", None)
+                wanted = check == r["id"] or (
+                    check is True and getattr(adapter, "integration", "api") != "browser"
+                )
+                if wanted and adapter is not None:
                     try:
                         r["health"] = adapter.health_check()
                     except Exception as e:

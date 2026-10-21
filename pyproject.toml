@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6"]
+browser = ["playwright>=1.45", "cryptography>=42"]
 
 [project.scripts]
 spenddat = "spenddat.cli:main"
@@ -32,6 +33,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q --strict-markers"
 markers = [
+  "browser: drives a real headless Chromium (skipped if Playwright/Chromium is missing)",
   "stripe_sandbox: exercises the real Stripe *test-mode* API; skipped unless STRIPE_TEST_SECRET_KEY is set",
 ]
 
@@ -46,4 +48,5 @@ ignore = ["S101", "RUF012"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "B017"]
+"tests/fake_shopify.py" = ["S", "E501"]
 "tools/**" = ["S"]

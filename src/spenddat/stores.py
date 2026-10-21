@@ -28,6 +28,7 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from spenddat.models import RuntimeMode
 
 TRUST_LEVELS = ("auto", "ask", "blocked")
+BUYER_APPROVAL_TYPES = {"shopify_web"}
 ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 SANDBOX_ONLY_TYPES = {"reference", "stub"}
 
@@ -133,6 +134,8 @@ class StoreConfig:
                     "base_url": section.get("base_url"),
                     "feed_url": section.get("feed_url"),
                     "catalog": section.get("catalog"),
+                    "store_url": section.get("store_url"),
+                    "test_store": bool(section.get("test_store", False)),
                     "api_key_secret": section.get("api_key_secret"),
                     "notes": str(v.get("notes") or ""),
                 }
@@ -158,7 +161,12 @@ class StoreConfig:
     def set_trust(self, vid: str, trust: str) -> None:
         if trust not in TRUST_LEVELS:
             raise StoreConfigError(f"trust must be one of {TRUST_LEVELS}")
-        self.get(vid)  # must exist
+        store = self.get(vid)  # must exist
+        if trust == "auto" and store["type"] in BUYER_APPROVAL_TYPES:
+            raise StoreConfigError(
+                "Shopify requires you to approve every order, so this store can't be "
+                "set to Auto-buy (choose Ask me)"
+            )
         doc, allow, deny = self._policy_lists()
         for seq in (allow, deny):
             while vid in seq:
@@ -177,8 +185,11 @@ class StoreConfig:
         if not ID_RE.match(vid):
             raise StoreConfigError("store id must be lowercase letters, digits and _")
         vtype = str(spec.get("type") or "acp")
-        if vtype not in ("acp", "reference"):
-            raise StoreConfigError("store type must be 'acp' (agent checkout) or 'reference'")
+        if vtype not in ("acp", "reference", "shopify_web"):
+            raise StoreConfigError(
+                "store type must be 'acp' (agent checkout), 'shopify_web' (Shopify store) "
+                "or 'reference' (demo)"
+            )
         if vtype in SANDBOX_ONLY_TYPES and self.mode is RuntimeMode.LIVE:
             raise StoreConfigError("demo stores are only available in sandbox mode")
         doc, vendors = self._vendors()
@@ -188,6 +199,17 @@ class StoreConfig:
         section = CommentedMap()
         if vtype == "reference":
             section["catalog"] = str(spec.get("catalog") or "everyday")
+        elif vtype == "shopify_web":
+            from spenddat.config import is_secure_url
+
+            url = str(spec.get("store_url") or "").strip().rstrip("/")
+            if not re.match(r"^https?://[^\s/]+$", url):
+                raise StoreConfigError("store URL must look like https://shop.example.com")
+            if not is_secure_url(url):
+                raise StoreConfigError("store URL must use https")
+            section["store_url"] = url
+            if spec.get("test_store"):
+                section["test_store"] = True
         else:
             for key in ("base_url", "feed_url"):
                 url = str(spec.get(key) or "").strip()

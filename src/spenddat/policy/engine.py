@@ -171,6 +171,16 @@ def rule_velocity(p: Policy, _: TransactionFacts, s: SpendContext) -> Iterable[F
         )
 
 
+def rule_merchant_confirmation(
+    _: Policy, t: TransactionFacts, __: SpendContext
+) -> Iterable[Finding]:
+    if t.data.merchant_requires_confirmation:
+        yield _esc(
+            "merchant_requires_buyer_approval",
+            f"store '{t.vendor}' requires you to approve every order",
+        )
+
+
 DEFAULT_RULES: tuple[Rule, ...] = (
     rule_vendor_blocklist,
     rule_category_denylist,
@@ -183,6 +193,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     rule_cumulative_caps,
     rule_price_anomaly,
     rule_velocity,
+    rule_merchant_confirmation,
 )
 
 

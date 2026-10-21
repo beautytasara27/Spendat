@@ -136,6 +136,7 @@ class DataQuality(Frozen):
     has_shipping_address: bool
     has_price: bool
     ambiguous: bool = False
+    merchant_requires_confirmation: bool = False  # e.g. Shopify: buyer OKs every order
 
 
 class TransactionFacts(Frozen):

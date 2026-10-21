@@ -49,6 +49,13 @@ class VendorAdapter(ABC):
     vendor_id: str
     integration: str  # "api" | "browser"
     display_name: str | None = None
+    # "stripe_spt": Spenddat issues a capped Stripe shared payment token per purchase.
+    # "merchant_wallet": the store charges a card saved in your account with that store
+    # (e.g. Shop Pay); Spenddat never handles a credential, only caps the approved total.
+    payment_kind: str = "stripe_spt"
+    # True when the store requires the buyer to approve each order (Shopify does);
+    # the policy engine then always escalates purchases from it.
+    requires_buyer_confirmation: bool = False
 
     @property
     def name(self) -> str:

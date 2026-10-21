@@ -665,11 +665,12 @@ const MONO = [
   "linear-gradient(135deg,#6ee7b7,#0f766e)", "linear-gradient(135deg,#fcd34d,#c2410c)",
 ];
 const hashIdx = (str, n) => [...str].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % n;
-const TYPE_LABEL = { acp: "Agent checkout", reference: "Demo store", stub: "Test store", browser: "Browser" };
+const TYPE_LABEL = { acp: "Agent checkout", reference: "Demo store", stub: "Test store", shopify_web: "Shopify · browser" };
 
 async function loadStores(check = false) {
   try {
-    ST.data = await api(`/api/stores${check ? "?check=1" : ""}`);
+    const q = check === true ? "?check=1" : check ? `?check=${encodeURIComponent(check)}` : "";
+    ST.data = await api(`/api/stores${q}`);
     renderStores();
   } catch (e) { toast(`Couldn't load stores: ${e.message}`, "bad"); }
 }
@@ -678,10 +679,13 @@ function storeCard(st) {
   const h = st.health;
   const health = !st.enabled ? `<span class="health"><i></i>Turned off</span>`
     : !st.loaded ? `<span class="health bad"><i></i>Not loaded</span>`
-    : h == null ? `<span class="health"><i></i>Checking…</span>`
-    : h.ok ? `<span class="health ok"><i></i>Connected${h.products != null ? ` · ${h.products} products` : ""}</span>`
+    : h == null ? `<span class="health"><i></i>${st.type === "shopify_web" ? "Not checked yet (opens Chrome)" : "Checking…"}</span>`
+    : h.ok ? `<span class="health ok"><i></i>Connected${h.products != null ? ` · ${h.products} products` : ""}${h.tools != null ? ` · ${h.tools} agent tools` : ""}</span>`
     : `<span class="health bad" title="${esc(h.error)}"><i></i>Unreachable</span>`;
-  const where = st.type === "acp"
+  const where = st.type === "shopify_web"
+    ? `<div>Store <code>${esc(st.store_url || "—")}</code></div>
+       <div>Pays with your saved Shop Pay card · you approve every order${ST.data.mode === "sandbox" && !st.test_store ? " · <b>sandbox: dry run, no real orders</b>" : st.test_store ? " · development store (test orders)" : ""}</div>`
+    : st.type === "acp"
     ? `<div>Checkout <code>${esc(st.base_url || "—")}</code></div>
        ${st.secret_env ? `<div>API key from <code>${esc(st.secret_env)}</code></div>` : ""}`
     : st.catalog ? `<div>Bundled catalog <code>${esc(typeof st.catalog === "string" ? st.catalog : "custom")}</code> · fake payments</div>` : "";
@@ -694,8 +698,10 @@ function storeCard(st) {
     </div>
     <div class="store-badges">${health}</div>
     <div class="trust-seg" role="group" aria-label="Trust level">
-      ${[["auto", "Auto-buy"], ["ask", "Ask me"], ["blocked", "Blocked"]].map(([k, l]) =>
-        `<button data-trust="${k}" aria-pressed="${st.trust === k}">${l}</button>`).join("")}
+      ${[["auto", "Auto-buy"], ["ask", "Ask me"], ["blocked", "Blocked"]].map(([k, l]) => {
+        const locked = k === "auto" && st.type === "shopify_web";
+        return `<button data-trust="${k}" aria-pressed="${st.trust === k}" ${locked ? 'disabled title="Shopify requires your approval for every order"' : ""}>${l}</button>`;
+      }).join("")}
     </div>
     <div class="store-meta">${where}</div>
     <div class="store-actions">
@@ -737,13 +743,14 @@ function bindStore(card) {
   const st = ST.data.stores.find((x) => x.id === id);
   $("[data-act=toggle]", card).addEventListener("click", () =>
     storeChange(`/api/stores/${id}`, { enabled: !st.enabled }, `${st.name} ${st.enabled ? "turned off" : "turned on"}`));
-  $$(".trust-seg button", card).forEach((b) => b.addEventListener("click", () => {
+  $$(".trust-seg button:not(:disabled)", card).forEach((b) => b.addEventListener("click", () => {
     if (b.dataset.trust === st.trust) return;
     const label = { auto: "can auto-buy", ask: "will ask you first", blocked: "is blocked" }[b.dataset.trust];
     storeChange(`/api/stores/${id}`, { trust: b.dataset.trust }, `${st.name} ${label}`);
   }));
   $("[data-act=test]", card).addEventListener("click", async () => {
-    await loadStores(true);
+    if (st.type === "shopify_web") toast(`Opening ${st.name} in Chrome…`);
+    await loadStores(id);
     const now = ST.data.stores.find((x) => x.id === id);
     toast(now?.health?.ok ? `${st.name} is reachable` : `${st.name}: ${now?.health?.error || "not loaded"}`, now?.health?.ok ? "good" : "bad");
   });
@@ -762,16 +769,18 @@ function renderAddStore() {
   const types = [
     ["acp", "Agent checkout store", "A shop that accepts AI-agent purchases (Agentic Commerce Protocol). Needs its checkout URL and an API key."],
     ...(d.demo ? [["reference", "Demo store", "A bundled test shop with a ready-made catalog and fake payments."]] : []),
-    ["browser", "Any website (browser)", "The agent opens the site and clicks through checkout. Only for shops whose terms allow it."],
+    ["shopify_web", "Shopify store", "Any Shopify store. Uses the agent tools Shopify publishes in the browser; pays with your saved Shop Pay card; you approve every order."],
   ];
   box.innerHTML = `<header class="card-head"><div><h2>Add a store</h2><p class="sub">New stores start on “Ask me”, so nothing is bought there without you until you say so.</p></div>
       <button class="btn ghost sm" data-act="close">${ICON.x}Close</button></header>
     <div class="type-pick">${types.map(([k, b, s]) =>
-      `<button class="type-opt" data-type="${k}" aria-pressed="${t === k}" ${k === "browser" ? "disabled" : ""}><b>${b}</b><span>${s}</span>${k === "browser" ? '<span class="soon">COMING NEXT</span>' : ""}</button>`).join("")}</div>
+      `<button class="type-opt" data-type="${k}" aria-pressed="${t === k}"><b>${b}</b><span>${s}</span></button>`).join("")}</div>
     <form id="store-form" class="form-grid" autocomplete="off">
       <label class="field"><span>Store name</span><input name="name" required maxlength="60" placeholder="${t === "reference" ? "Kicks Outlet" : "e.g. Sneaker Street"}"></label>
-      <label class="field"><span>Trust</span><select name="trust"><option value="ask">Ask me (recommended)</option><option value="auto">Auto-buy</option><option value="blocked">Blocked</option></select></label>
-      ${t === "reference" ? `
+      <label class="field"><span>Trust</span><select name="trust"><option value="ask">Ask me (recommended)</option>${t === "shopify_web" ? "" : '<option value="auto">Auto-buy</option>'}<option value="blocked">Blocked</option></select></label>
+      ${t === "shopify_web" ? `
+        <label class="field full"><span>Store address <small>(the shop's home page)</small></span><input name="store_url" type="url" required placeholder="https://shop.example.com"></label>
+        ${d.mode === "sandbox" ? `<label class="field full check"><span><input type="checkbox" name="test_store" value="1"> This is a Shopify <b>development</b> store (its orders aren't real). Otherwise sandbox mode stops before placing the order.</span></label>` : ""}` : t === "reference" ? `
         <label class="field full"><span>Catalog</span><select name="catalog">${d.catalogs.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")}</select></label>` : `
         <label class="field full"><span>Checkout URL <small>(the store's ACP base URL)</small></span><input name="base_url" type="url" required placeholder="https://shop.example.com/acp"></label>
         <label class="field full"><span>Product feed URL</span><input name="feed_url" type="url" required placeholder="https://shop.example.com/acp/feed.json"></label>
@@ -779,7 +788,7 @@ function renderAddStore() {
         <label class="field"><span>API key secret name <small>(optional)</small></span><input name="api_key_secret" placeholder="auto: &lt;store_id&gt;_api_key"></label>`}
     </form>
     <div class="form-foot">
-      <p>${t === "acp" ? `API keys are never saved by this page. After adding, put the key in your <code>.env</code> file under the name shown on the store card, then restart.` : "Demo stores use fake payments and never charge anything."}</p>
+      <p>${t === "shopify_web" ? `Before the first purchase run <code>spenddat browser login</code> once and sign in to Shop Pay with a saved card. Chrome opens when Spenddat shops here.` : t === "acp" ? `API keys are never saved by this page. After adding, put the key in your <code>.env</code> file under the name shown on the store card, then restart.` : "Demo stores use fake payments and never charge anything."}</p>
       <button class="btn primary" data-act="save">${ICON.check}Add store</button>
     </div>`;
   $("[data-act=close]", box).addEventListener("click", () => { ST.adding = false; renderAddStore(); });
@@ -790,6 +799,7 @@ function renderAddStore() {
     const body = Object.fromEntries(new FormData(f).entries());
     body.type = t;
     if (!body.api_key_secret) delete body.api_key_secret;
+    if (t === "shopify_web") body.test_store = body.test_store === "1";
     await storeChange("/api/stores", body, `${body.name} added`);
     if (!$("#store-list").textContent.includes(body.name)) return;
     ST.adding = false; renderAddStore();

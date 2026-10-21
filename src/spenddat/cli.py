@@ -313,6 +313,89 @@ def cmd_shop(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_browser(args: argparse.Namespace) -> int:
+    import json as _json
+    from pathlib import Path
+    from urllib.parse import urlparse
+
+    from spenddat.browser import config_from_env
+    from spenddat.browser.session import (
+        BrowserSession,
+        BrowserUnavailable,
+        ToolCallError,
+        call_tool,
+        list_tools,
+    )
+
+    if args.browser_cmd == "keys":
+        from spenddat.browser.webbotauth import init_keys
+
+        key_file, dir_file, kid = init_keys(args.dir)
+        print(f"private key:     {key_file}   (keep private; data/ is git-ignored)")
+        print(f"public directory: {dir_file}")
+        print(f"key id:          {kid}")
+        print(
+            "Next: publish the directory file at a public https URL, register it with "
+            "Shopify, then set SPENDDAT_WBA_DIRECTORY_URL=<that URL> in .env."
+        )
+        return 0
+
+    session = BrowserSession(config_from_env())
+    try:
+        if args.browser_cmd == "login":
+
+            def login(b: BrowserSession) -> None:
+                p = b.page("login", args.url)
+                print(
+                    "A Chrome window opened. Sign in to Shop Pay and make sure a card is "
+                    "saved there. Close the window when you're done."
+                )
+                while not p.is_closed():
+                    p.wait_for_timeout(1000)
+
+            session.run(login, timeout=None)
+            print("Saved. Spenddat's browser profile now has your Shop Pay sign-in.")
+            return 0
+
+        if args.browser_cmd == "inspect":
+            url = args.url.rstrip("/")
+
+            def inspect(b: BrowserSession) -> dict:
+                p = b.page("inspect", url)
+                out: dict = {"store": url, "tools": list_tools(p)}
+                if args.query and any(t["name"] == "search_catalog" for t in out["tools"]):
+                    from spenddat.vendors.shopify_web import args_for_search
+
+                    schema = next(t for t in out["tools"] if t["name"] == "search_catalog")
+                    try:
+                        a = args_for_search(schema["inputSchema"], args.query)
+                        out["sample_search"] = {
+                            "args": a,
+                            "result": call_tool(p, "search_catalog", a),
+                        }
+                    except (ToolCallError, ValueError) as e:
+                        out["sample_search"] = {"error": str(e)}
+                return out
+
+            data = session.run(inspect, timeout=120)
+            host = urlparse(url).hostname or "store"
+            dest = Path("data/browser") / f"inspect-{host}.json"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(_json.dumps(data, indent=2, default=str), encoding="utf-8")
+            print(f"{url}: {len(data['tools'])} agent tools")
+            for t in data["tools"]:
+                props = sorted((t["inputSchema"] or {}).get("properties", {}))
+                print(f"  {t['name']:<32} args: {', '.join(props) or '-'}")
+            print(f"full details saved to {dest}")
+            return 0
+    except BrowserUnavailable as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 69
+    finally:
+        session.close()
+    return 2
+
+
 def cmd_stripe_check(args: argparse.Namespace) -> int:
     import os
     from pathlib import Path
@@ -407,6 +490,17 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("order_id", nargs="?")
     sr.add_argument("--all", action="store_true")
     sh.set_defaults(func=cmd_shop)
+
+    br = sub.add_parser("browser", help="the Chrome window used for Shopify stores")
+    brs = br.add_subparsers(dest="browser_cmd", required=True)
+    bl = brs.add_parser("login", help="sign in to Shop Pay once in Spenddat's browser")
+    bl.add_argument("--url", default="https://shop.app")
+    bi = brs.add_parser("inspect", help="list a store's agent tools (no cart/checkout changes)")
+    bi.add_argument("url")
+    bi.add_argument("--query", help="also run one sample product search")
+    bk = brs.add_parser("keys", help="create Web Bot Auth signing keys")
+    bk.add_argument("--dir", default="data/wba")
+    br.set_defaults(func=cmd_browser)
 
     sub.add_parser(
         "stripe-check", help="verify Stripe keys, card and shop profile (no money moves)"

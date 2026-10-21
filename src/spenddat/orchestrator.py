@@ -488,6 +488,9 @@ class Orchestrator:
                 has_shipping_address=self._ship_to is not None,
                 has_price=item is not None,
                 ambiguous=ambiguous,
+                merchant_requires_confirmation=bool(
+                    getattr(self._registry.get(vendor), "requires_buyer_confirmation", False)
+                ),
             ),
         )
 
@@ -822,6 +825,8 @@ class Orchestrator:
             )
 
         cred: ScopedCredential | None = None
+        if getattr(adapter, "payment_kind", "stripe_spt") == "merchant_wallet":
+            return self._execute_wallet(permit, adapter, item, decision, approval_id)
         try:
             try:
                 cred = self._payments.issue(
@@ -863,6 +868,47 @@ class Orchestrator:
         finally:
             if cred is not None:
                 self._revoke(txn_id, cred)
+
+    def _execute_wallet(
+        self,
+        permit: ExecutionPermit,
+        adapter: VendorAdapter,
+        item: ResolvedItem,
+        decision: Decision | None,
+        approval_id: str | None,
+    ) -> TxnResult:
+        """Stores that charge a card saved with them (Shop Pay). No credential is issued;
+        the adapter must refuse to complete if the store's total exceeds ``max_amount``."""
+        txn_id = permit.txn_id
+        cap = min(item.total_minor, permit.ceiling_minor)
+        label = getattr(adapter, "payment_label", lambda _ref: None)(item.vendor_ref)
+        self._event(
+            txn_id,
+            "merchant_wallet_payment",
+            {
+                "store": item.vendor,
+                "max_amount_minor": cap,
+                "currency": item.currency,
+                "instrument": label or "card saved with the store",
+            },
+        )
+        handle = PaymentHandle("merchant_wallet", "merchant", cap, item.currency)
+        try:
+            receipt = adapter.purchase(item, handle, self._ship_to, idempotency_key=txn_id)
+        except VendorError as e:
+            adapter.cancel(item.vendor_ref)
+            return self._fail(txn_id, "purchase", str(e), decision, approval_id)
+        except (VendorOutcomeUnknown, Exception) as e:
+            self._event(txn_id, "execution_outcome_unknown", {"error": f"{type(e).__name__}: {e}"})
+            return self._reconcile_one(txn_id, adapter, decision, approval_id)
+        if receipt.amount_minor > cap:
+            # The store charged more than approved. Record it truthfully and alert.
+            self._event(
+                txn_id,
+                "amount_exceeded_approval",
+                {"charged_minor": receipt.amount_minor, "approved_minor": cap},
+            )
+        return self._complete(txn_id, receipt, decision, approval_id)
 
     def _revoke(self, txn_id: str, cred: ScopedCredential) -> None:
         try:
